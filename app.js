@@ -41,9 +41,8 @@ const WEIGHTS = {
   cls:    0.06,   // 級別
 };
 
-// モンテカルロ・シミュレーション設定
-const SIM_RUNS = 20000;  // 試行回数（多いほど安定）
-const T_SIM = 13;        // 強さの温度（小さいほど強い艇が勝ちやすい＝差が出る）
+// 予想モデルの温度（小さいほど強い艇に評価が集中＝堅く出る）
+const TEMP = 13;
 
 const $ = (id) => document.getElementById(id);
 const venueSel = $("venue");
@@ -149,54 +148,108 @@ function scoreBoat(b) {
 
 const seq = (n) => Array.from({ length: n }, (_, i) => i);
 
-// モンテカルロ・シミュレーション。
-// 各艇の強さ w=exp(score/T) を使い、Plackett-Luce モデルで着順を1着から
-// 順に確率抽選する。これを SIM_RUNS 回繰り返し、各艇の着順分布と
-// 3連単(1着-2着-3着)の出現頻度を集計する。
+// Claude流の各艇分析。スコアに加え、コース取り（戦法）と
+// データから読み取れる所見（コメント材料）を生成する。
+function analyzeBoat(b) {
+  const lane = b.racer_boat_number;
+  const score = scoreBoat(b);
+  const tags = [];
+
+  const courseRole = {
+    1: "イン逃げの軸",
+    2: "差し・まくりの2番手",
+    3: "3コースから差し／まくり",
+    4: "カドまくりの一発",
+    5: "外枠から展開待ち",
+    6: "大外で展開待ち",
+  }[lane] || "";
+
+  if (b.racer_class_number === 1) tags.push("A1級の実力者");
+  else if (b.racer_class_number === 4) tags.push("B2級で格下");
+
+  const n2 = b.racer_national_top_2_percent || 0;
+  if (n2 >= 45) tags.push("全国2連率" + fmt(n2) + "%と一線級");
+  else if (n2 >= 35) tags.push("安定した近況");
+  else if (n2 < 25 && n2 > 0) tags.push("近況は振るわず");
+
+  const l2 = b.racer_local_top_2_percent || 0;
+  if (l2 - n2 >= 5) tags.push("当地巧者（当地2連率" + fmt(l2) + "%）");
+
+  const st = b.racer_average_start_timing;
+  if (st != null && st <= 0.14) tags.push("ST" + st.toFixed(2) + "と鋭い");
+  else if (st != null && st >= 0.19) tags.push("STやや甘め");
+
+  const m2 = b.racer_assigned_motor_top_2_percent || 0;
+  if (m2 >= 42) tags.push("好機関（モーター2連率" + fmt(m2) + "%）");
+  else if (m2 <= 28 && m2 > 0) tags.push("モーター非力");
+
+  const f = b.racer_flying_count || 0;
+  if (f >= 1) tags.push("F" + f + "持ちで慎重");
+
+  return { b, score, courseRole, tags, w: Math.exp(score / TEMP) };
+}
+
+// Claudeの分析予想。乱数を使わず、Plackett-Luce の閉形式で
+// 各艇の1着/2着/3着確率と3連単(1着-2着-3着)の確率を厳密に計算する。
 function predict(race) {
-  const boats = race.boats.map((b) => {
-    const score = scoreBoat(b);
-    return { b, score, w: Math.exp(score / T_SIM) };
-  });
-  const M = boats.length;
-  const pos1 = Array(M).fill(0), pos2 = Array(M).fill(0), pos3 = Array(M).fill(0);
-  const trif = new Map(); // "a-b-c"(艇番) -> 回数
+  const items = race.boats.map(analyzeBoat);
+  const n = items.length;
+  const W = items.reduce((s, x) => s + x.w, 0);
 
-  for (let s = 0; s < SIM_RUNS; s++) {
-    const remain = seq(M);
-    const order = [];
-    for (let k = 0; k < 3; k++) {
-      let sum = 0;
-      for (const i of remain) sum += boats[i].w;
-      let r = Math.random() * sum, pick = remain[remain.length - 1];
-      for (const i of remain) { r -= boats[i].w; if (r <= 0) { pick = i; break; } }
-      order.push(pick);
-      remain.splice(remain.indexOf(pick), 1);
+  const p2 = Array(n).fill(0), p3 = Array(n).fill(0);
+  const combos = [];
+  items.forEach((x, i) => { x.p1 = x.w / W * 100; });
+
+  for (let i = 0; i < n; i++) {
+    const wi = items[i].w, W1 = W - wi;
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const wj = items[j].w, W2 = W1 - wj;
+      const pij = (wi / W) * (wj / W1);   // P(1着=i, 2着=j)
+      p2[j] += pij;
+      for (let k = 0; k < n; k++) {
+        if (k === i || k === j) continue;
+        const pijk = pij * (items[k].w / W2); // P(1着=i,2着=j,3着=k)
+        p3[k] += pijk;
+        combos.push({
+          key: items[i].b.racer_boat_number + "-" +
+               items[j].b.racer_boat_number + "-" +
+               items[k].b.racer_boat_number,
+          prob: pijk * 100,
+        });
+      }
     }
-    pos1[order[0]]++; pos2[order[1]]++; pos3[order[2]]++;
-    const key = boats[order[0]].b.racer_boat_number + "-" +
-                boats[order[1]].b.racer_boat_number + "-" +
-                boats[order[2]].b.racer_boat_number;
-    trif.set(key, (trif.get(key) || 0) + 1);
   }
-
-  boats.forEach((x, i) => {
-    x.p1 = pos1[i] / SIM_RUNS * 100;        // 1着率
-    x.p2 = pos2[i] / SIM_RUNS * 100;        // 2着率
-    x.p3 = pos3[i] / SIM_RUNS * 100;        // 3着率
-    x.in3 = (pos1[i] + pos2[i] + pos3[i]) / SIM_RUNS * 100; // 3着内率
+  items.forEach((x, i) => {
+    x.p2 = p2[i] * 100;
+    x.p3 = p3[i] * 100;
+    x.in3 = x.p1 + x.p2 + x.p3;
   });
-  boats.sort((a, b) => b.p1 - a.p1); // 1着率の高い順＝勝率順
 
-  const combos = [...trif.entries()]
-    .map(([key, c]) => ({ key, prob: c / SIM_RUNS * 100 }))
-    .sort((a, b) => b.prob - a.prob);
+  combos.sort((a, b) => b.prob - a.prob);
+  items.sort((a, b) => b.p1 - a.p1); // 1着確率の高い順＝予想印順
 
-  return { ranked: boats, combos, runs: SIM_RUNS };
+  return { ranked: items, combos, comment: raceComment(items) };
+}
+
+// Claudeのレース総評を文章で生成
+function raceComment(ranked) {
+  const nm = (x) => x.b.racer_boat_number + "号艇" + (x.b.racer_name ? "・" + x.b.racer_name : "");
+  const o = ranked[0], t = ranked[1], s = ranked[2], a = ranked[3];
+  let txt = "本命は" + nm(o) + "。" + o.courseRole +
+            "で1着率" + o.p1.toFixed(0) + "%、最も信頼できる。";
+  if (o.tags[0]) txt += "（" + o.tags[0] + "）";
+  txt += "対抗は" + nm(t) + "、" + (t.tags[0] || t.courseRole) + "。";
+  txt += "3着付けに" + nm(s) + "を加えたい。";
+  if (a && a.p1 >= 8) txt += "波乱含みなら" + nm(a) + "の一発にも警戒。";
+  // 堅さ/荒れの総括
+  if (o.p1 >= 55) txt += " 全体に本命が抜けており、堅く狙えるレース。";
+  else if (o.p1 < 35) txt += " 上位が拮抗しており、頭が割れやすい難解なレース。";
+  return txt;
 }
 
 // フォーメーション（1着/2着/3着の候補=ranked内インデックス集合）の
-// シミュレーション的中率（％）を、出現した3連単の確率を合算して求める。
+// 的中率（％）＝フォーメーションに含まれる3連単の確率を合算した値。
 function formationHitRate(combos, ranked, s1, s2, s3) {
   const set1 = new Set(s1.map((i) => ranked[i].b.racer_boat_number));
   const set2 = new Set(s2.map((i) => ranked[i].b.racer_boat_number));
@@ -238,7 +291,7 @@ function pickTiers(frontier) {
 const MARKS = ["◎", "○", "▲", "△", "×", ""];
 
 function renderResult(race, pred) {
-  const { ranked, combos, runs } = pred;
+  const { ranked, combos, comment } = pred;
   const stadium = STADIUMS[race.race_stadium_number] || "場" + race.race_stadium_number;
   const grade = race.race_grade_number;
   const maxP1 = Math.max(ranked[0].p1, 1);
@@ -254,19 +307,22 @@ function renderResult(race, pred) {
           (race.race_subtitle ? " ／ " + esc(race.race_subtitle) : "") +
           " ・ " + (race.race_distance || "?") + "m" +
           " ・ 締切 " + (race.race_closed_at || "").slice(11, 16) + "</div>";
-  html += '<div class="sim-tag">🎲 モンテカルロ ' + runs.toLocaleString() + "回 シミュレーション</div>";
   html += "</div>";
 
-  // 印つき予想一覧（着順分布）
-  html += '<div class="section-label">🎯 予想印・着順シミュレーション</div>';
+  // Claudeの総評
+  html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
+          '<div class="cc-body">' + esc(comment) + "</div></div>";
+
+  // 印つき予想一覧（各艇分析）
+  html += '<div class="section-label">🎯 予想印・各艇分析</div>';
   ranked.forEach((x, i) => { html += boatCard(x, i, maxP1); });
 
-  // 3連単の出現上位（シミュレーション頻度）
-  html += '<div class="section-label">📊 3連単 出現ランキング（上位8）</div>';
+  // 3連単の確率上位
+  html += '<div class="section-label">📊 3連単 確率上位（Claude分析）</div>';
   html += renderTopCombos(combos, ranked);
 
   // 勝ちに最も近いフォーメーション
-  html += '<div class="section-label">💴 3連単フォーメーション（的中率＝シミュレーション）</div>';
+  html += '<div class="section-label">💴 3連単フォーメーション（的中率＝分析確率）</div>';
   html += renderBets(pred);
 
   resultEl.innerHTML = html;
@@ -302,11 +358,14 @@ function boatCard(x, i, maxP1) {
   h += "<span>3着内率: <b>" + x.in3.toFixed(1) + "%</b></span>";
   h += "<span>モーター2連: <b>" + fmt(b.racer_assigned_motor_top_2_percent) + "%</b></span>";
   h += "</div>";
+  // Claudeの所見
+  const cmt = (x.courseRole ? x.courseRole : "") + (x.tags.length ? "。" + x.tags.join("・") : "");
+  if (cmt) h += '<div class="boat-cmt">💬 ' + esc(cmt) + "</div>";
   h += "</div>";
   return h;
 }
 
-// 3連単の出現上位をシミュレーション確率つきで表示
+// 3連単の確率上位を表示
 function renderTopCombos(combos, ranked) {
   let h = '<div class="bet-box">';
   combos.slice(0, 8).forEach((c, idx) => {
@@ -319,12 +378,12 @@ function renderTopCombos(combos, ranked) {
     h += '<span class="combo-prob">' + c.prob.toFixed(1) + "%</span>";
     h += "</div>";
   });
-  h += '<div class="bet-note">※ シミュレーションでこの並びが出た割合。1点目の本命候補です。</div>';
+  h += '<div class="bet-note">※ Claude分析によるこの並びの出現確率。1点目の本命候補です。</div>';
   h += "</div>";
   return h;
 }
 
-// 勝ちに最も近い3連単フォーメーションを、シミュレーションの的中率で提案する。
+// 勝ちに最も近い3連単フォーメーションを、分析確率による的中率で提案する。
 function renderBets(pred) {
   const { ranked, combos } = pred;
   const frontier = buildFormations(combos, ranked);
@@ -342,7 +401,7 @@ function renderBets(pred) {
   return h;
 }
 
-// フォーメーション1つを描画（シミュレーション的中率つき）
+// フォーメーション1つを描画（分析確率による的中率つき）
 function formationBox(label, t, ranked, recommended) {
   let h = '<div class="bet-box' + (recommended ? " recommended" : "") + '">';
   h += '<div class="bet-type">3連単 ' + label +

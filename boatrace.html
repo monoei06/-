@@ -327,7 +327,7 @@ const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 GAS(JSONP)対応 (v11)";
+const APP_VERSION = "2026-06-13 予想モデル改良(実データ最適化) (v12)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -346,32 +346,28 @@ const CLASSES = { 1: "A1", 2: "A2", 3: "B1", 4: "B2" };
 // グレード番号 → 表示
 const GRADES = { 1: "SG", 2: "G1", 3: "G2", 4: "G3", 5: "一般" };
 
-// コース別 1着率の全国平均（％・概算）。インから順に大きい = イン有利を反映。
-const COURSE_WIN_RATE = { 1: 55, 2: 14, 3: 13, 4: 11, 5: 6, 6: 3 };
+// 進入コース別の1着率（実データ715レースから算出した経験値）。
+// ボートレースはコースが最大の決定要因。これを基礎強度に使う。
+const COURSE_BASE = { 1: 0.596, 2: 0.123, 3: 0.116, 4: 0.092, 5: 0.057, 6: 0.016 };
+// 3着内率（参考・コメント用）
+const COURSE_IN3 = { 1: 0.82, 2: 0.60, 3: 0.52, 4: 0.44, 5: 0.40, 6: 0.23 };
 
-// 予想モデルの重み（合計1.0）。出走表のあらゆる指標を取り込む。
-const WEIGHTS = {
-  course: 0.26,   // コース（進入）有利度
-  nat2:   0.18,   // 全国2連対率
-  nat1:   0.10,   // 全国勝率
-  nat3:   0.04,   // 全国3連対率
-  local2: 0.08,   // 当地2連対率
-  local1: 0.04,   // 当地勝率
-  start:  0.10,   // 平均スタートタイミング
-  motor2: 0.08,   // モーター2連対率
-  motor3: 0.03,   // モーター3連対率
-  boat2:  0.03,   // ボート2連対率
-  cls:    0.06,   // 級別
+// 能力指数の重み（コースは含めない。出走表のあらゆる指標を取り込む）
+const ABILITY_W = {
+  nat2:   0.26,   // 全国2連対率
+  nat1:   0.16,   // 全国勝率
+  nat3:   0.06,   // 全国3連対率
+  local2: 0.12,   // 当地2連対率
+  local1: 0.06,   // 当地勝率
+  start:  0.14,   // 平均スタートタイミング
+  motor2: 0.12,   // モーター2連対率
+  motor3: 0.04,   // モーター3連対率
+  boat2:  0.04,   // ボート2連対率
 };
 
-// 直前情報（展示）の加点重み。preview がある時だけスコアに上乗せする。
-const PRE_WEIGHTS = {
-  exhibition: 16,  // 展示タイム（レース内で相対評価。速いほど加点）
-  exhibitST:  6,   // 展示スタートタイミング（鋭いほど加点）
-};
-
-// 予想モデルの温度（小さいほど強い艇に評価が集中＝堅く出る）
-const TEMP = 13;
+// 強度モデルのパラメータ（実データのバックテストで最適化）
+const BETA = 0.6;   // 能力差の効き具合（大きいほど能力重視／小さいほどコース重視）
+const W_PRE = 0.2;  // 直前（展示）の能力への反映ウェイト（0=無視, 1=展示のみ）
 
 const $ = (id) => document.getElementById(id);
 const venueSel = $("venue");
@@ -565,37 +561,32 @@ function populateRaces() {
 /* ----------------------------- 予想ロジック ----------------------------- */
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-// 各艇のスコア（0-100目安）を算出。出走表のあらゆる指標を取り込む。
-// pv（直前情報）があれば、枠番ではなく「実際の進入コース」で有利度を評価する。
-function scoreBoat(b, pv) {
-  const course = (pv && pv.racer_course_number) || b.racer_boat_number;
+// 各艇の「能力指数」を算出（コースは含めない／0-100目安）。
+// 全国・当地の勝率＆連対率、平均ST、モーター・ボート、級別を統合する。
+function abilityIndex(b) {
   const pct = (v) => clamp(v || 0, 0, 100);          // %系（0-100）
   const rate = (v) => clamp((v || 0) / 8 * 100, 0, 100); // 勝率系（概ね0-8）
 
-  const courseScore = (COURSE_WIN_RATE[course] || 0) / 55 * 100;
   // 平均ST: 0.10秒=満点, 0.25秒=0点（低いほど良い）
   const st = b.racer_average_start_timing;
   const startScore = (st == null) ? 50 : clamp((0.25 - st) / (0.25 - 0.10) * 100, 0, 100);
-  const clsScore = { 1: 100, 2: 75, 3: 50, 4: 25 }[b.racer_class_number] || 50;
+  const clsScore = { 1: 80, 2: 62, 3: 45, 4: 30 }[b.racer_class_number] || 50;
 
-  let score =
-    WEIGHTS.course * courseScore +
-    WEIGHTS.nat2   * pct(b.racer_national_top_2_percent) +
-    WEIGHTS.nat1   * rate(b.racer_national_top_1_percent) +
-    WEIGHTS.nat3   * pct(b.racer_national_top_3_percent) +
-    WEIGHTS.local2 * pct(b.racer_local_top_2_percent) +
-    WEIGHTS.local1 * rate(b.racer_local_top_1_percent) +
-    WEIGHTS.start  * startScore +
-    WEIGHTS.motor2 * pct(b.racer_assigned_motor_top_2_percent) +
-    WEIGHTS.motor3 * pct(b.racer_assigned_motor_top_3_percent) +
-    WEIGHTS.boat2  * pct(b.racer_assigned_boat_top_2_percent) +
-    WEIGHTS.cls    * clsScore;
+  let a =
+    ABILITY_W.nat2   * pct(b.racer_national_top_2_percent) +
+    ABILITY_W.nat1   * rate(b.racer_national_top_1_percent) +
+    ABILITY_W.nat3   * pct(b.racer_national_top_3_percent) +
+    ABILITY_W.local2 * pct(b.racer_local_top_2_percent) +
+    ABILITY_W.local1 * rate(b.racer_local_top_1_percent) +
+    ABILITY_W.start  * startScore +
+    ABILITY_W.motor2 * pct(b.racer_assigned_motor_top_2_percent) +
+    ABILITY_W.motor3 * pct(b.racer_assigned_motor_top_3_percent) +
+    ABILITY_W.boat2  * pct(b.racer_assigned_boat_top_2_percent);
 
+  a = 0.85 * a + 0.15 * clsScore; // 級別を少しブレンド
   // フライング・出遅れ減点（事故率・信頼性の低下）
-  const fl = (b.racer_flying_count || 0) + (b.racer_late_count || 0);
-  score -= fl * 8;
-
-  return Math.max(score, 1);
+  a -= ((b.racer_flying_count || 0) + (b.racer_late_count || 0)) * 6;
+  return a;
 }
 
 const seq = (n) => Array.from({ length: n }, (_, i) => i);
@@ -603,7 +594,7 @@ const seq = (n) => Array.from({ length: n }, (_, i) => i);
 // Claude流の各艇分析。スコアに加え、コース取り（戦法）と
 // データから読み取れる所見（コメント材料）を生成する。pv は直前情報。
 function analyzeBoat(b, pv) {
-  const score = scoreBoat(b, pv);
+  const ability = abilityIndex(b);
   const tags = [];
   const course = (pv && pv.racer_course_number) || b.racer_boat_number;
 
@@ -650,7 +641,7 @@ function analyzeBoat(b, pv) {
     if (est != null && est <= 0.05) tags.push("展示ST" + est.toFixed(2) + "と好スタート");
   }
 
-  return { b, pv, score, course, courseRole, tags, w: Math.exp(score / TEMP) };
+  return { b, pv, ability, course, courseRole, tags };
 }
 
 // Claudeの分析予想。乱数を使わず、Plackett-Luce の閉形式で
@@ -669,31 +660,35 @@ function predict(race, preview) {
   });
   const n = items.length;
 
-  // 直前：展示タイムをレース内で相対評価して加点（速いほど高評価）
+  // 直前：展示タイム・展示STをレース内で相対評価し、能力指数にブレンド（速い＝高評価）
   const exTimes = items.map((x) => x.pv && x.pv.racer_exhibition_time).filter((t) => t > 0);
   if (exTimes.length >= 2) {
     const min = Math.min(...exTimes), max = Math.max(...exTimes);
     items.forEach((x) => {
       const t = x.pv && x.pv.racer_exhibition_time;
-      if (t != null && max > min) {
-        x.exScore = (max - t) / (max - min) * 100;     // 0-100
-        x.score += PRE_WEIGHTS.exhibition * (x.exScore / 100);
-        // 展示タイム上位はタグでも明示
+      if (t != null && t > 0 && max > min) {
+        const exSc = (max - t) / (max - min) * 100;                 // 展示タイム（速い=100）
+        const est = x.pv && x.pv.racer_start_timing;
+        const stSc = (est != null) ? clamp((0.20 - est) / 0.25 * 100, 0, 100) : 50; // 展示ST（鋭い=高）
+        const preSc = 0.7 * exSc + 0.3 * stSc;
+        x.ability = (1 - W_PRE) * x.ability + W_PRE * preSc;        // 直前を能力に反映
       }
-      // 展示STの鋭さも軽く加点
-      const est = x.pv && x.pv.racer_start_timing;
-      if (est != null) {
-        const stScore = clamp((0.20 - est) / (0.20 - (-0.05)) * 100, 0, 100);
-        x.score += PRE_WEIGHTS.exhibitST * (stScore / 100);
-      }
-      x.w = Math.exp(x.score / TEMP); // 加点後に強さを再計算
     });
     // 展示最速にタグ付け
     const fastest = items.reduce((a, x) =>
-      (x.pv && x.pv.racer_exhibition_time != null &&
+      (x.pv && x.pv.racer_exhibition_time > 0 &&
        (!a || x.pv.racer_exhibition_time < a.pv.racer_exhibition_time)) ? x : a, null);
     if (fastest) fastest.tags.unshift("展示タイム最速" + fastest.pv.racer_exhibition_time.toFixed(2));
   }
+
+  // 強度 = コース基礎1着率 × exp(BETA × 能力のレース内偏差)。
+  // コースを土台に、能力差で上下させる（バックテストで最適化したモデル）。
+  const mean = items.reduce((s, x) => s + x.ability, 0) / n;
+  const sd = Math.max(Math.sqrt(items.reduce((s, x) => s + (x.ability - mean) ** 2, 0) / n), 1);
+  items.forEach((x) => {
+    const z = (x.ability - mean) / sd;
+    x.w = (COURSE_BASE[x.course] || 0.02) * Math.exp(BETA * z);
+  });
 
   const W = items.reduce((s, x) => s + x.w, 0);
 

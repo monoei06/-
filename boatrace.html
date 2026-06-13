@@ -327,7 +327,7 @@ const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 直前情報サーバー対応 (v8)";
+const APP_VERSION = "2026-06-13 直前情報サーバー(Cloudflare)対応 (v10)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -387,11 +387,24 @@ let PREVIEWS = new Map();   // "stadium-race" -> 直前情報
 const preKey = (stadium, raceNo) => stadium + "-" + raceNo;
 
 /* ------------------- 直前情報サーバー（プロキシ）設定 ------------------- */
+// ↓ デプロイした Cloudflare Worker のURLをここに焼き込むと、スマホでも設定なしで動く
+const DEFAULT_PROXY_URL = "";
 const PROXY_KEY = "boatrace_proxy_url";
 let proxyUrlMem = "";
+
+// URLハッシュ #proxy=... からの指定（ホーム画面ショートカット用）
+function hashProxyUrl() {
+  try {
+    const v = new URLSearchParams((location.hash || "").replace(/^#/, "")).get("proxy");
+    return v ? decodeURIComponent(v) : "";
+  } catch { return ""; }
+}
+
+// 優先順位: ⚙️手入力(localStorage) → URLハッシュ → 埋め込みデフォルト
 function getProxyUrl() {
-  try { return (localStorage.getItem(PROXY_KEY) || proxyUrlMem || "").trim(); }
-  catch { return proxyUrlMem.trim(); }
+  let saved = "";
+  try { saved = localStorage.getItem(PROXY_KEY) || ""; } catch { saved = proxyUrlMem; }
+  return (saved || proxyUrlMem || hashProxyUrl() || DEFAULT_PROXY_URL || "").trim();
 }
 function setProxyUrl(v) {
   proxyUrlMem = v || "";

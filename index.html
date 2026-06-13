@@ -26,7 +26,10 @@
       <label for="race">レース</label>
       <select id="race" disabled><option>—</option></select>
     </div>
-    <button id="predict" class="predict-btn" disabled>予想する</button>
+    <div class="btn-row">
+      <button id="predict" class="predict-btn" disabled>予想する</button>
+      <button id="refresh" class="refresh-btn" title="出走表・直前情報を再取得">🔄</button>
+    </div>
   </section>
 
   <div id="status" class="status"></div>
@@ -36,6 +39,7 @@
 <footer class="app-footer">
   <p>データ提供: <a href="https://boatraceopenapi.github.io/" target="_blank" rel="noopener">Boatrace Open API</a></p>
   <p class="disclaimer">※ 本アプリの予想は公開データに基づく自動計算であり、的中を保証するものではありません。舟券の購入は自己責任で。20歳未満は舟券を購入できません。</p>
+  <p class="version" id="version"></p>
 </footer>
 
 <script src="app.js"></script>

@@ -74,8 +74,9 @@ select {
 }
 select:disabled { opacity: .55; }
 
+.btn-row { display: flex; gap: 10px; margin-top: 4px; }
 .predict-btn {
-  margin-top: 4px;
+  flex: 1;
   font-size: 1.1rem;
   font-weight: 800;
   color: #fff;
@@ -88,6 +89,13 @@ select:disabled { opacity: .55; }
   box-shadow: 0 4px 12px rgba(255,107,53,.35);
   transition: transform .08s ease, opacity .2s;
 }
+.refresh-btn {
+  flex-shrink: 0; width: 52px; min-height: 52px;
+  font-size: 1.3rem; border: 2px solid var(--line);
+  background: #fff; border-radius: 12px; cursor: pointer;
+}
+.refresh-btn:active { transform: rotate(180deg); transition: transform .3s; }
+.version { font-size: .66rem !important; color: var(--muted); opacity: .7; margin-top: 8px !important; }
 .predict-btn:active { transform: scale(.98); }
 .predict-btn:disabled { opacity: .5; box-shadow: none; cursor: default; }
 
@@ -270,7 +278,10 @@ select:disabled { opacity: .55; }
       <label for="race">レース</label>
       <select id="race" disabled><option>—</option></select>
     </div>
-    <button id="predict" class="predict-btn" disabled>予想する</button>
+    <div class="btn-row">
+      <button id="predict" class="predict-btn" disabled>予想する</button>
+      <button id="refresh" class="refresh-btn" title="出走表・直前情報を再取得">🔄</button>
+    </div>
   </section>
 
   <div id="status" class="status"></div>
@@ -280,6 +291,7 @@ select:disabled { opacity: .55; }
 <footer class="app-footer">
   <p>データ提供: <a href="https://boatraceopenapi.github.io/" target="_blank" rel="noopener">Boatrace Open API</a></p>
   <p class="disclaimer">※ 本アプリの予想は公開データに基づく自動計算であり、的中を保証するものではありません。舟券の購入は自己責任で。20歳未満は舟券を購入できません。</p>
+  <p class="version" id="version"></p>
 </footer>
 
 <script>
@@ -294,6 +306,9 @@ select:disabled { opacity: .55; }
 
 const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
+
+// ビルド識別（最新ファイルを開いているか判別用）
+const APP_VERSION = "2026-06-13 直前情報対応版 (v5)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -379,7 +394,9 @@ async function loadData() {
     }
     groupByStadium();
     populateVenues();
-    setStatus("");
+    // 取得サマリ（直前情報が反映されているかを明示）
+    const withPre = [...PREVIEWS.values()].filter((p) => p && p.boats).length;
+    setStatus("✅ 本日 " + PROGRAMS.length + "R を取得（🟢直前情報 " + withPre + "R）。会場とレースを選んで予想！");
   } catch (e) {
     setStatus("データ取得に失敗しました。通信環境を確認して再読み込みしてください。<br><small>" + e.message + "</small>", true);
   }
@@ -830,6 +847,19 @@ predictBtn.addEventListener("click", () => {
   const preview = PREVIEWS.get(preKey(race.race_stadium_number, race.race_number));
   renderResult(race, predict(race, preview));
 });
+
+// 🔄 データ再取得（締切直前の展示情報を取り込み直す）
+const refreshBtn = $("refresh");
+if (refreshBtn) refreshBtn.addEventListener("click", () => {
+  const v = venueSel.value, r = raceSel.value;
+  loadData().then(() => {
+    if (v) { venueSel.value = v; populateRaces(); if (r) raceSel.value = r; }
+  });
+});
+
+// バージョン表示
+const verEl = $("version");
+if (verEl) verEl.textContent = "ビルド: " + APP_VERSION;
 
 loadData();
 

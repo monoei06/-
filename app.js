@@ -10,6 +10,9 @@
 const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 
+// ビルド識別（最新ファイルを開いているか判別用）
+const APP_VERSION = "2026-06-13 直前情報対応版 (v5)";
+
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
 
@@ -94,7 +97,9 @@ async function loadData() {
     }
     groupByStadium();
     populateVenues();
-    setStatus("");
+    // 取得サマリ（直前情報が反映されているかを明示）
+    const withPre = [...PREVIEWS.values()].filter((p) => p && p.boats).length;
+    setStatus("✅ 本日 " + PROGRAMS.length + "R を取得（🟢直前情報 " + withPre + "R）。会場とレースを選んで予想！");
   } catch (e) {
     setStatus("データ取得に失敗しました。通信環境を確認して再読み込みしてください。<br><small>" + e.message + "</small>", true);
   }
@@ -545,5 +550,18 @@ predictBtn.addEventListener("click", () => {
   const preview = PREVIEWS.get(preKey(race.race_stadium_number, race.race_number));
   renderResult(race, predict(race, preview));
 });
+
+// 🔄 データ再取得（締切直前の展示情報を取り込み直す）
+const refreshBtn = $("refresh");
+if (refreshBtn) refreshBtn.addEventListener("click", () => {
+  const v = venueSel.value, r = raceSel.value;
+  loadData().then(() => {
+    if (v) { venueSel.value = v; populateRaces(); if (r) raceSel.value = r; }
+  });
+});
+
+// バージョン表示
+const verEl = $("version");
+if (verEl) verEl.textContent = "ビルド: " + APP_VERSION;
 
 loadData();

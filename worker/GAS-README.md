@@ -52,6 +52,19 @@ https://script.google.com/macros/s/...../exec?jcd=20&rno=6&hd=20260613
 
 `{"boats":{"1":{"exhibition_time":6.77,...}},"weather":{...},"exhibition":true}` のように出ればOK。
 
+## 🤖 Claude(AI)予想を使う場合（任意）
+
+アプリの「🤖 Claude(AI)に予想させる」を使うには、GASにAPIキーを設定します（HTMLには入れません＝安全）。
+
+1. https://console.anthropic.com/ で **APIキー**を発行（`sk-ant-...`）
+2. GASエディタ → 左の歯車「**プロジェクトの設定**」→ 下の「**スクリプト プロパティ**」
+3. 「**スクリプト プロパティを追加**」→ プロパティ名 `ANTHROPIC_API_KEY` / 値にAPIキーを貼り付け → **保存**
+4. （コードを更新した場合は「デプロイ → デプロイを管理 → ✏️ → 新バージョン」で再デプロイ）
+
+これでアプリのチェックを入れて「予想する」を押すと、Claude(Opus 4.8)が予想します。
+- 予想1回ごとに少額の課金が発生します（Opusで概ね¥1.5〜3程度）。
+- 安く/速くしたい場合は `gas-proxy.gs` の `CLAUDE_MODEL` を `claude-sonnet-4-6`（バランス）や `claude-haiku-4-5`（最安）に変更。
+
 ## うまくいかないとき
 
 - **構文エラー（SyntaxError）が出る**：スマホのエディタが貼り付け時に記号を自動補完して

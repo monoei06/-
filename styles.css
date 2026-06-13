@@ -86,6 +86,12 @@ select:disabled { opacity: .55; }
 .refresh-btn:active { transform: rotate(180deg); transition: transform .3s; }
 .version { font-size: .66rem !important; color: var(--muted); opacity: .7; margin-top: 8px !important; }
 
+.claude-toggle { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: .9rem; font-weight: 700; color: #6d28d9; cursor: pointer; }
+.claude-toggle input { width: 20px; height: 20px; }
+.claude-note { font-size: .68rem; font-weight: 600; color: var(--muted); }
+.claude-comment.ai { background: linear-gradient(135deg, #faf5ff, #eef2ff); border-left-color: #9333ea; }
+.ai-badge { font-size: .62rem; font-weight: 800; color: #fff; background: #9333ea; padding: 1px 7px; border-radius: 999px; vertical-align: middle; }
+
 .settings { margin-top: 4px; font-size: .82rem; }
 .settings summary { cursor: pointer; color: var(--navy); font-weight: 700; padding: 6px 0; }
 .settings input {

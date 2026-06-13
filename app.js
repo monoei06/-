@@ -12,7 +12,7 @@ const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 const RESULTS_URL = "https://boatraceopenapi.github.io/results/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 着順別モデル(2-3着精度向上) (v14)";
+const APP_VERSION = "2026-06-13 Claude(AI)予想オプション追加 (v15)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -214,6 +214,82 @@ async function fetchLivePreview(race) {
     d = await res.json();
   }
   return proxyToPreview(d, race.race_stadium_number, race.race_number);
+}
+
+/* ------------------- Claude(AI)予想（GAS経由でAPI呼び出し） ------------------- */
+function getUseClaude() {
+  const el = $("useClaude");
+  return !!(el && el.checked);
+}
+
+// GAS の predict モードを JSONP で呼び、Claude の予想JSONを得る
+async function fetchClaudePrediction(race) {
+  const proxy = getProxyUrl();
+  if (!proxy || !isGasUrl(proxy)) throw new Error("Claude予想にはGASの直前情報サーバーURLが必要です");
+  const params = {
+    mode: "predict",
+    jcd: String(race.race_stadium_number).padStart(2, "0"),
+    rno: race.race_number,
+    hd: (race.race_date || "").replace(/-/g, ""),
+    _: Date.now(),
+  };
+  const d = await fetchJsonp(proxy, params, 90000); // Claudeの応答は時間がかかるため長め
+  if (d && d.error) throw new Error(d.error + (d.message ? "：" + d.message : ""));
+  return d;
+}
+
+// Claudeの確率出力 → アプリ内の予想オブジェクト（位置別プラケット・ルースで3連単を構成）
+function predictFromClaude(race, claude, preview) {
+  const pr = claude.prediction || {};
+  const byBoat = {};
+  for (const cb of (pr.boats || [])) byBoat[cb.boat] = cb;
+
+  const usePv = (preview && preview.boats) ? preview : null;
+  const items = race.boats.map((b) => {
+    const pv = usePv && usePv.boats ? usePv.boats[String(b.racer_boat_number)] : null;
+    const a = analyzeBoat(b, pv); // courseRole/tags（表示用）を流用
+    const c = byBoat[b.racer_boat_number] || {};
+    a.claudeReason = c.reason || "";
+    a.claudeMark = c.mark || "";
+    // Claudeの確率を強度に（0は微小値に）
+    a.w1 = Math.max(Number(c.win) || 0, 0.001);
+    a.w2 = Math.max(Number(c.place2) || 0, 0.001);
+    a.w3 = Math.max(Number(c.place3) || 0, 0.001);
+    return a;
+  });
+  const n = items.length;
+  const S1 = items.reduce((s, x) => s + x.w1, 0);
+  const S2 = items.reduce((s, x) => s + x.w2, 0);
+  const S3 = items.reduce((s, x) => s + x.w3, 0);
+  const p2 = Array(n).fill(0), p3 = Array(n).fill(0), combos = [];
+  items.forEach((x) => { x.p1 = x.w1 / S1 * 100; });
+  for (let i = 0; i < n; i++) {
+    const A = items[i];
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const B = items[j];
+      const pij = (A.w1 / S1) * (B.w2 / (S2 - A.w2));
+      p2[j] += pij;
+      for (let k = 0; k < n; k++) {
+        if (k === i || k === j) continue;
+        const C = items[k];
+        const pijk = pij * (C.w3 / (S3 - A.w3 - B.w3));
+        p3[k] += pijk;
+        combos.push({ key: A.b.racer_boat_number + "-" + B.b.racer_boat_number + "-" + C.b.racer_boat_number, prob: pijk * 100 });
+      }
+    }
+  }
+  items.forEach((x, i) => { x.p2 = p2[i] * 100; x.p3 = p3[i] * 100; x.in3 = x.p1 + x.p2 + x.p3; });
+  combos.sort((a, b) => b.prob - a.prob);
+  items.sort((a, b) => b.p1 - a.p1);
+  return {
+    ranked: items, combos,
+    hasExhibition: !!claude.exhibition,
+    hasWeather: !!(claude.weather && (claude.weather.wind_speed != null)),
+    preview,
+    claude: { model: claude.model, comment: pr.race_comment || "" },
+    comment: (claude.exhibition ? "【直前情報（展示）を反映】" : "【出走表のみ・展示前】") + (pr.race_comment || ""),
+  };
 }
 
 /* ----------------------------- データ取得 ------------------------------ */
@@ -606,8 +682,11 @@ function renderResult(race, pred) {
       "</div>";
   }
 
-  // Claudeの総評
-  html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
+  // Claudeの総評（AI予想ならモデル名を表示）
+  const ccHead = pred.claude
+    ? '🤖 Claude(' + esc(pred.claude.model || "AI") + ')の予想 <span class="ai-badge">AI</span>'
+    : '🧠 Claudeの予想';
+  html += '<div class="claude-comment' + (pred.claude ? ' ai' : '') + '"><div class="cc-head">' + ccHead + "</div>" +
           '<div class="cc-body">' + esc(comment) + "</div></div>";
 
   // 印つき予想一覧（各艇分析）
@@ -662,7 +741,9 @@ function boatCard(x, i, maxP1) {
   }
   h += "</div>";
   // Claudeの所見
-  const cmt = (x.courseRole ? x.courseRole : "") + (x.tags.length ? "。" + x.tags.join("・") : "");
+  const cmt = x.claudeReason
+    ? x.claudeReason
+    : (x.courseRole ? x.courseRole : "") + (x.tags.length ? "。" + x.tags.join("・") : "");
   if (cmt) h += '<div class="boat-cmt">💬 ' + esc(cmt) + "</div>";
   h += "</div>";
   return h;
@@ -769,6 +850,20 @@ async function runPrediction() {
     if (statusEl.querySelector(".spinner")) setStatus("");
   }
 
+  // 🤖 Claude(AI)に予想させる
+  if (getUseClaude()) {
+    setStatus('<div class="spinner"></div>🤖 Claudeが予想中…（10〜30秒ほどかかります）');
+    try {
+      const claude = await fetchClaudePrediction(race);
+      renderResult(race, predictFromClaude(race, claude, preview));
+      setStatus("");
+      return;
+    } catch (e) {
+      setStatus("⚠️ Claude予想に失敗しました（統計モデルで予想します）。<br><small>" + e.message + "</small>", true);
+      setTimeout(() => { if (statusEl.textContent.includes("Claude予想に失敗")) setStatus(""); }, 6000);
+    }
+  }
+
   renderResult(race, predict(race, preview));
 }
 
@@ -792,6 +887,15 @@ if (proxyInput) {
   proxyInput.value = getProxyUrl();
   proxyInput.addEventListener("change", () => setProxyUrl(proxyInput.value));
   proxyInput.addEventListener("blur", () => setProxyUrl(proxyInput.value));
+}
+
+// 🤖 Claude予想トグル（localStorage に保存）
+const claudeChk = $("useClaude");
+if (claudeChk) {
+  try { claudeChk.checked = localStorage.getItem("boatrace_use_claude") === "1"; } catch {}
+  claudeChk.addEventListener("change", () => {
+    try { localStorage.setItem("boatrace_use_claude", claudeChk.checked ? "1" : "0"); } catch {}
+  });
 }
 
 // バージョン表示

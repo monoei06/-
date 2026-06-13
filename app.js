@@ -72,7 +72,7 @@ const preKey = (stadium, raceNo) => stadium + "-" + raceNo;
 
 /* ------------------- 直前情報サーバー（プロキシ）設定 ------------------- */
 // ↓ デプロイした Cloudflare Worker のURLをここに焼き込むと、スマホでも設定なしで動く
-const DEFAULT_PROXY_URL = "";
+const DEFAULT_PROXY_URL = "https://script.google.com/macros/s/AKfycbwY9616g0uHJAXgqqPdwWcYqo0n5pCc1nstM8d9vD-cP3-PqqN3rH1eJBue5IxX1zEbiw/exec";
 const PROXY_KEY = "boatrace_proxy_url";
 let proxyUrlMem = "";
 

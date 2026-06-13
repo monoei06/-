@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v7（Claude本格予想プロンプト・3連複）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v8（AI総合分析を本文表示・3連複）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -732,12 +732,12 @@ function renderResult(race, A) {
   if (ctx.length) html += '<div class="cond">' + ctx.map((c) => "<span>" + c + "</span>").join("") + "</div>";
   html += "</div>";
 
-  // AI総評
-  html += '<div class="claude-comment"><div class="cc-head">🧠 AIの予想</div>' +
-    '<div class="cc-body">' + esc(raceComment(ranked, depth, A)) + "</div></div>";
+  // AI予想（総合分析）— アプリ内で自動生成
+  html += '<div class="claude-comment"><div class="cc-head">🧠 Claude(AI)の予想・総合分析</div>' +
+    '<div class="cc-body">' + aiAnalysisHTML(race, A) + "</div></div>";
 
-  // Claudeの本格予想（AI視点）— claude.ai(Maxプラン)に貼るプロンプトを生成（API不要）
-  html += '<div class="section-label">🧠 Claudeの本格予想（AI視点）</div>';
+  // さらに本物のClaude(claude.ai/Maxプラン)に相談 — プロンプト生成（API不要）
+  html += '<div class="section-label">💬 さらに claude.ai（Maxプラン）に相談</div>';
   html += '<div class="bet-box claude-box"><div id="claudeOut" class="claude-out">';
   html += '<button id="copyClaude" class="claude-btn">📋 Claude用プロンプトをコピー</button>';
   html += '<a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai を開く ↗</a>';
@@ -899,6 +899,76 @@ function renderTopTrifecta(A) {
       '<span class="combo-prob">' + (c.prob * 100).toFixed(2) + "%</span></div>";
   });
   h += '<div class="bet-note">※ この並びで決まる厳密確率（市場オッズ基準）。理論オッズ≒100÷確率。</div></div>';
+  return h;
+}
+
+// アプリ内で生成する「AIの総合分析」。市場確率＋近走指数等から自然文の予想を組み立てる。
+// （Maxプランは外部から自動呼び出しできず、APIも使わない方針のため、本アプリのエンジンで生成）
+function aiAnalysisHTML(race, A) {
+  const R = A.items, depth = A.depth;
+  const o = R[0], t = R[1], s = R[2];
+  const conc = R.slice(0, 3).reduce((a, x) => a + x.p1, 0);
+  const sec = (label, body) => '<div class="ai-sec"><b>' + label + '</b>' + body + "</div>";
+
+  // 各馬の所見（利用できるデータだけで）
+  const note = (x) => {
+    const h = x.h, ps = pastSummary(h.past), n = [];
+    if (ps && ps.best != null) n.push("近走指数" + ps.best + (ps.trend >= 5 ? "↑上昇" : ps.trend <= -5 ? "↓下降" : ""));
+    if (h.weight_diff != null && Math.abs(h.weight_diff) >= 12) n.push("馬体重" + (h.weight_diff > 0 ? "大幅増(+" + h.weight_diff + ")" : "大幅減(" + h.weight_diff + ")"));
+    if (h.jockey) n.push(esc(h.jockey));
+    return n.length ? "（" + n.join("・") + "）" : "";
+  };
+  const nm = (x) => x.idxNum + "番 " + esc(x.h.name || "");
+
+  let h = "";
+
+  // 構図
+  let katachi;
+  if (o.p1 >= 35) katachi = "本命" + nm(o) + "が抜けた信頼度の高い一戦。堅く獲りにいける。";
+  else if (o.p1 < 22) katachi = "上位が拮抗し頭が割れやすい難解戦。波乱含みで点数を広げたい。";
+  else katachi = "標準的な堅さ。上位数頭の力が接近しており、◎軸の3連複で手広くが妥当。";
+  katachi += "（上位3頭で勝率合計" + conc.toFixed(0) + "%、" + A.n + "頭立て";
+  if (race.track_condition && race.track_condition !== "良") katachi += "・馬場" + esc(race.track_condition);
+  katachi += "）";
+  h += sec("構図　", katachi);
+
+  // 本命・対抗・単穴
+  h += sec("◎本命　", nm(o) + " — 勝率" + o.p1.toFixed(0) + "%・" + depth + "着内率" + o.in3.toFixed(0) + "% " + note(o));
+  if (t) h += sec("◯対抗　", nm(t) + " — 勝率" + t.p1.toFixed(0) + "% " + note(t));
+  if (s) h += sec("▲単穴　", nm(s) + " — 勝率" + s.p1.toFixed(0) + "% " + note(s));
+
+  // ヒモ
+  const himo = R.slice(3, Math.min(6, R.length));
+  if (himo.length) h += sec("△ヒモ　", himo.map((x) => x.idxNum + "番" + esc(x.h.name || "")).join("、"));
+
+  // 妙味（近走指数が上昇 or 上位級なのに人気が無い馬）
+  const oBest = (pastSummary(o.h.past) || {}).best;
+  let value = null;
+  for (const x of R.slice(3, 9)) {
+    const ps = pastSummary(x.h.past);
+    if (ps && (ps.trend >= 5 || (ps.best != null && oBest != null && ps.best >= oBest))) { value = x; break; }
+  }
+  if (value) h += sec("🔥妙味　", nm(value) + " — 人気の盲点になりやすいが近走内容は上位級。ヒモ穴に一考" + note(value));
+
+  // 推奨買い目（3連複）
+  const plans = buildTrioPlans(A).sort((a, b) => b.hit - a.hit);
+  let rec = null, eff = -1;
+  for (const p of plans) { const e = p.hit / p.pts; if (p.hit >= 40 && e > eff) { eff = e; rec = p; } }
+  if (!rec && plans.length) rec = plans[0];
+  if (rec) {
+    const members = rec.rows.map((row) => row.label + "[" + row.idxs.map((i) => R[i].idxNum).join("・") + "]").join(" ");
+    h += sec("🎯推奨　", "3連複 " + esc(rec.label) + "（" + members + "）＝ " + rec.pts + "点・的中率" + rec.hit.toFixed(0) + "%。" +
+      "堅実に当てるなら◎の複勝も併用。");
+  }
+
+  // リスク
+  let risk;
+  if (o.p1 >= 35) risk = "本命の取りこぼし時は配当妙味が薄い。崩れる場合は人気薄の台頭に注意。";
+  else risk = "上位拮抗ゆえ3着内の取りこぼしが起きやすい。手広く構えるか、ワイドで保険を。";
+  h += sec("⚠️リスク　", risk);
+
+  h += '<div class="ai-disc">※ 市場オッズを基準にした自動分析です。競馬は分散が大きく的中を保証しません。' +
+    'さらに踏み込んだ読みは下の「claude.ai に相談」をご利用ください。</div>';
   return h;
 }
 

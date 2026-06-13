@@ -94,6 +94,31 @@ input[type="date"] {
 .rh-title { font-size: 1.15rem; font-weight: 800; color: var(--green); }
 .rh-name { font-size: .95rem; color: var(--text); font-weight: 700; margin-left: 4px; }
 .rh-sub { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+.conf { float: right; font-size: .72rem; font-weight: 800; padding: 2px 9px; border-radius: 999px; color: #fff; }
+.conf-高 { background: #1b8a3a; }
+.conf-中 { background: #d39a00; }
+.conf-低 { background: #b04632; }
+.cond { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cond span { font-size: .74rem; background: #eef3ee; color: var(--text); border-radius: 6px; padding: 2px 8px; }
+
+/* 妙味ボックス */
+.value-box { border-left: 4px solid var(--accent); }
+.vtype { flex-shrink: 0; font-size: .72rem; font-weight: 800; color: #fff; background: var(--accent-dark); border-radius: 6px; padding: 2px 7px; margin-right: 2px; }
+.value-meta { margin-left: auto; font-size: .76rem; color: var(--muted); text-align: right; }
+.roi { font-size: .72rem; font-weight: 800; margin-left: 8px; padding: 1px 6px; border-radius: 5px; }
+.roi.pos { background: #e3f5e9; color: var(--good); }
+.roi.neg { background: #f3eeee; color: #9a6b6b; }
+
+/* 枠番ドット */
+.waku-dot { font-size: .68rem; font-weight: 800; padding: 1px 6px; border-radius: 5px; border: 1px solid #ccc; }
+.waku-1 { background: #fff; color: #111; }
+.waku-2 { background: #222; color: #fff; border-color:#222; }
+.waku-3 { background: #e02424; color: #fff; border-color:#e02424; }
+.waku-4 { background: #2563eb; color: #fff; border-color:#2563eb; }
+.waku-5 { background: #facc15; color: #111; border-color:#facc15; }
+.waku-6 { background: #16a34a; color: #fff; border-color:#16a34a; }
+.waku-7 { background: #f97316; color: #fff; border-color:#f97316; }
+.waku-8 { background: #ec4899; color: #fff; border-color:#ec4899; }
 
 /* AIコメント */
 .claude-comment { background: linear-gradient(135deg, #f0f7f0, #e8f3ea); border: 1px solid #cfe6d2; border-radius: 14px; padding: 14px 16px; margin-bottom: 16px; }

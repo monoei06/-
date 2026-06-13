@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v2（日付選択対応）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v3（複勝補正・実オッズEV・妙味・信頼度）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -17,8 +17,8 @@ const PROXY_KEY = "keiba_proxy_url";
 // 本命-大穴バイアス補正の指数（favorite-longshot bias）。
 // 競馬では「本命はオッズが示すより実際に多く勝ち、大穴は過剰人気で負けやすい」ことが
 // 長年実証されている。市場勝率 p を p^BETA に補正（BETA>1 で本命を引き上げる）。
-// 1.0=無補正(市場どおり)、1.15 前後が経験的に妥当。
-const BETA = 1.15;
+// 頭数が多い・荒れやすいレースほどバイアスが強いとされるため、頭数で自動調整する。
+function adaptiveBeta(n) { return clamp(1.08 + 0.012 * (n - 8), 1.08, 1.22); }
 
 const $ = (id) => document.getElementById(id);
 const dateSel = $("datePick");
@@ -144,22 +144,23 @@ function popFallback(horses) {
 }
 
 // 厳密確率計算（乱数なし）。Plackett–Luce 閉形式。
-function analyze(horses) {
+function analyze(horses, pools) {
   const mk = marketProbs(horses);
+  const n = mk.items.length;
+  const beta = adaptiveBeta(n);
   const items = mk.items.map((x) => ({
-    h: x.h, mp: x.p, w: Math.pow(Math.max(x.p, 1e-9), BETA),
+    h: x.h, mp: x.p, w: Math.pow(Math.max(x.p, 1e-9), beta),
   }));
-  const n = items.length;
-  const W = items.reduce((s, x) => s + x.w, 0);
+  const wsum = items.reduce((s, x) => s + x.w, 0);
+  items.forEach((x) => { x.idxNum = x.h.num; });
 
   const p1 = Array(n).fill(0), p2 = Array(n).fill(0), p3 = Array(n).fill(0);
   const exacta = {};        // "i-j" -> P(i1着,j2着)
   const trio = {};          // "a-b-c"(昇順) -> P(その3頭がtop3)
   const trifecta = [];      // {key:"i-j-k", prob}
+  const triMap = {};        // "i-j-k"(着順) -> 確率（EV照合用）
   const quinella = {};      // "a-b"(昇順) -> P(top2がその2頭)
 
-  items.forEach((x) => { x.idxNum = x.h.num; });
-  const wsum = W;
   for (let i = 0; i < n; i++) {
     const wi = items[i].w, W1 = wsum - wi;
     p1[i] = wi / wsum;
@@ -175,7 +176,9 @@ function analyze(horses) {
         if (k === i || k === j) continue;
         const pijk = pij * (items[k].w / W2);
         p3[k] += pijk;
-        trifecta.push({ key: items[i].idxNum + "-" + items[j].idxNum + "-" + items[k].idxNum, prob: pijk });
+        const tkey = items[i].idxNum + "-" + items[j].idxNum + "-" + items[k].idxNum;
+        trifecta.push({ key: tkey, prob: pijk });
+        triMap[tkey] = pijk;
         const tk = trioKey(items[i].idxNum, items[j].idxNum, items[k].idxNum);
         trio[tk] = (trio[tk] || 0) + pijk;        // 6通り合算→3連複
       }
@@ -183,6 +186,7 @@ function analyze(horses) {
   }
   // ワイド（2頭ともtop3）は専用に厳密計算する
   const wideExact = computeWideExact(items, wsum);
+  const depth = placeDepth(n);
 
   items.forEach((x, i) => {
     x.p1 = p1[i] * 100;                  // AI勝率（バイアス補正後）
@@ -190,12 +194,37 @@ function analyze(horses) {
     x.p3 = p3[i] * 100;
     x.marketP1 = x.mp * 100;             // 市場勝率（オッズそのまま）
     x.top2 = (p1[i] + p2[i]) * 100;     // 連対率
-    x.in3 = (p1[i] + p2[i] + p3[i]) * 100; // 3着内率(複勝圏)
+    x.in3model = (p1[i] + p2[i] + p3[i]) * 100; // PLによる3着内率
+    x.in3 = x.in3model;
   });
+  // 市場複勝オッズで複勝率を補正（複勝プールは単勝由来PLより鋭いことが多い）
+  blendPlace(items, depth);
+
   items.sort((a, b) => b.p1 - a.p1);
   trifecta.sort((a, b) => b.prob - a.prob);
 
-  return { items, n, exacta, trio, wide: wideExact, quinella, trifecta, basis: mk.basis, overround: mk.overround };
+  return {
+    items, n, beta, depth, exacta, trio, wide: wideExact, quinella, trifecta, triMap,
+    pools: pools || null, basis: mk.basis, overround: mk.overround,
+  };
+}
+
+// 市場の複勝オッズ（複勝プール）を使って各馬の3着内率を補正する。
+// 複勝オッズの逆数を正規化（合計=複勝圏頭数 depth）したものが市場の複勝率の推定。
+function blendPlace(items, depth) {
+  const inv = items.map((x) => { const po = placeOddsOf(x.h); return po ? 1 / po.avg : null; });
+  const have = inv.filter((v) => v != null);
+  if (have.length < Math.max(2, items.length - 3)) { items.forEach((x) => { x.marketIn3 = null; }); return; }
+  const s = have.reduce((a, b) => a + b, 0);
+  items.forEach((x, i) => {
+    if (inv[i] != null) {
+      const mkt = clamp(inv[i] / s * depth * 100, 0, 99);
+      x.marketIn3 = mkt;
+      x.in3 = clamp(0.55 * mkt + 0.45 * x.in3model, x.top2, 99.5); // 市場寄りに混合（連対率は下回らない）
+    } else {
+      x.marketIn3 = null;
+    }
+  });
 }
 
 // ワイド（2頭がともにtop3）の厳密確率を直接計算
@@ -225,6 +254,24 @@ function trioSetProb(items, W, a, b, c) {
 
 function pairKey(a, b) { return a < b ? a + "-" + b : b + "-" + a; }
 function trioKey(a, b, c) { return [a, b, c].sort((x, y) => x - y).join("-"); }
+
+/* --------- オッズプール照合（実オッズ→期待値EV） --------- */
+function pad2(n) { return String(n).padStart(2, "0"); }
+function uKey(a, b) { const x = [a, b].sort((p, q) => p - q); return pad2(x[0]) + pad2(x[1]); }            // 馬連/ワイド/枠連キー
+function tKey(a, b, c) { const x = [a, b, c].sort((p, q) => p - q); return pad2(x[0]) + pad2(x[1]) + pad2(x[2]); } // 3連複キー
+function oKey(a, b, c) { return pad2(a) + pad2(b) + pad2(c); }                                            // 3連単キー（着順）
+function poolOdds(pool, key, mid) {
+  if (!pool) return null;
+  const v = pool[key];
+  if (v == null) return null;
+  return Array.isArray(v) ? (mid ? (v[0] + v[1]) / 2 : v[0]) : v;
+}
+// combos: [{prob: 小数, odds: 倍}] → 1点100円×点数 に対する期待回収倍率（>1で理論プラス）
+function evRatio(combos) {
+  let exp = 0, valid = 0;
+  for (const c of combos) { if (c.odds > 0) { exp += c.prob * c.odds; valid++; } }
+  return valid ? exp / combos.length : null;
+}
 
 /* ----------------------------- 買い目組み立て ------------------------------ */
 // 出走頭数に応じた複勝/ワイドの「○着以内」
@@ -275,28 +322,31 @@ function buildBets(A, race) {
     const wsum = pairs.reduce((s, [a, b]) => s + (A.wide[pairKey(top3[a].idxNum, top3[b].idxNum)] || 0), 0);
     const all3 = trioSetProb(A.items, sumW(A), idxOf(A, top3[0]), idxOf(A, top3[1]), idxOf(A, top3[2]));
     const hit = (wsum - 2 * all3) * 100; // 少なくとも1点的中＝3頭中2頭以上が複勝圏
+    const combos = pairs.map(([a, b]) => ({
+      prob: A.wide[pairKey(top3[a].idxNum, top3[b].idxNum)] || 0,
+      odds: poolOdds(A.pools && A.pools.wide, uKey(top3[a].idxNum, top3[b].idxNum), true),
+    }));
     bets.push({
-      cat: "wide",
-      label: "上位3頭 ワイドBOX",
+      cat: "wide", label: "上位3頭 ワイドBOX",
       desc: "◎○▲ から2頭が" + depth + "着以内（3点）",
       tickets: top3.map((x, i) => chip(x, i)),
-      pts: 3, hit,
-      fair: breakeven(3, hit), // この配当以上で買えば理論上プラス
+      pts: 3, hit, ev: evRatio(combos), fair: breakeven(3, hit),
     });
   }
-  // 3) 馬連 上位（◎-○○▲ 流し / BOX）
+  // 3) 馬連 ◎流し
   if (n >= 5 && ranked.length >= 3) {
     const partners = ranked.slice(1, 4);
-    const tickets = [chip(ranked[0], 0)];
     let hit = 0;
-    partners.forEach((pp, i) => { hit += (A.quinella[pairKey(ranked[0].idxNum, pp.idxNum)] || 0) * 100; });
+    const combos = partners.map((pp) => {
+      const prob = A.quinella[pairKey(ranked[0].idxNum, pp.idxNum)] || 0;
+      hit += prob * 100;
+      return { prob, odds: poolOdds(A.pools && A.pools.umaren, uKey(ranked[0].idxNum, pp.idxNum)) };
+    });
     bets.push({
-      cat: "umaren",
-      label: "馬連 ◎流し",
+      cat: "umaren", label: "馬連 ◎流し",
       desc: numName(ranked[0]) + " → " + partners.map((x) => x.idxNum).join("・") + "（" + partners.length + "点）",
       tickets: [chip(ranked[0], 0), ...partners.map((x, i) => chip(x, i + 1))],
-      pts: partners.length, hit,
-      fair: breakeven(partners.length, hit),
+      pts: partners.length, hit, ev: evRatio(combos), fair: breakeven(partners.length, hit),
     });
   }
   // 4) 3連複 ◎軸流し（相手4頭→6点）
@@ -306,17 +356,15 @@ function buildBets(A, race) {
     let hit = 0;
     const combos = [];
     for (let i = 0; i < partners.length; i++) for (let j = i + 1; j < partners.length; j++) {
-      const tk = trioKey(axis.idxNum, partners[i].idxNum, partners[j].idxNum);
-      hit += (A.trio[tk] || 0) * 100;
-      combos.push(tk);
+      const prob = A.trio[trioKey(axis.idxNum, partners[i].idxNum, partners[j].idxNum)] || 0;
+      hit += prob * 100;
+      combos.push({ prob, odds: poolOdds(A.pools && A.pools.trio, tKey(axis.idxNum, partners[i].idxNum, partners[j].idxNum)) });
     }
     bets.push({
-      cat: "fuku3",
-      label: "3連複 ◎軸流し",
+      cat: "fuku3", label: "3連複 ◎軸流し",
       desc: numName(axis) + " 軸 − 相手" + partners.map((x) => x.idxNum).join("・") + "（6点）",
       tickets: [chip(axis, 0), ...partners.map((x, i) => chip(x, i + 1))],
-      pts: combos.length, hit,
-      fair: breakeven(combos.length, hit),
+      pts: combos.length, hit, ev: evRatio(combos), fair: breakeven(combos.length, hit),
     });
   }
   // 5) 3連単 フォーメーション（効率フロンティアから高配当向け）
@@ -349,6 +397,13 @@ function buildTrifectaFormation(A) {
   const fmt1 = best.s1.map((i) => chip(ranked[i], i));
   const fmt2 = best.s2.map((i) => chip(ranked[i], i));
   const fmt3 = best.s3.map((i) => chip(ranked[i], i));
+  // 実オッズから期待値（フォーメーション内の各着順組合せ）
+  const combos = [];
+  for (const i of best.s1) for (const j of best.s2) for (const k of best.s3) {
+    if (i === j || j === k || i === k) continue;
+    const a = ranked[i].idxNum, b = ranked[j].idxNum, c = ranked[k].idxNum;
+    combos.push({ prob: A.triMap[a + "-" + b + "-" + c] || 0, odds: poolOdds(A.pools && A.pools.trifecta, oKey(a, b, c)) });
+  }
   return {
     cat: "tan3",
     label: "3連単 フォーメーション（高配当）",
@@ -356,7 +411,7 @@ function buildTrifectaFormation(A) {
       best.s2.map((i) => ranked[i].idxNum).join("・") + "] → 3着[" +
       best.s3.map((i) => ranked[i].idxNum).join("・") + "]",
     formation: [fmt1, fmt2, fmt3],
-    pts: best.pts, hit: best.hit,
+    pts: best.pts, hit: best.hit, ev: evRatio(combos),
     fair: breakeven(best.pts, best.hit),
   };
 }
@@ -393,6 +448,53 @@ function placeOddsOf(h) {
   return { min: h.place_min, max, avg: (h.place_min + max) / 2 };
 }
 
+/* ----------------------------- 妙味（期待値プラス）探索 ------------------------------ */
+// 各馬券種の実オッズ × モデル確率で期待値を計算し、+EV（割安＝市場の歪み）を発掘する。
+// モデル確率は単勝プール由来。各馬券プールがそれと食い違って厚い配当を出している点を拾う。
+function valueBets(A) {
+  if (!A.pools) return [];
+  const R = A.items, out = [];
+  const top = R.slice(0, Math.min(8, R.length));   // ノイズ抑制のため上位8頭中心に探索
+  const add = (type, tickets, ev, hit, oddsStr) => {
+    if (ev != null && isFinite(ev)) out.push({ type, tickets, ev, hit, oddsStr });
+  };
+  R.forEach((x) => {
+    if (x.h.win_odds) add("単勝", [chipOf(x)], (x.p1 / 100) * x.h.win_odds, x.p1, x.h.win_odds + "倍");
+    const po = placeOddsOf(x.h);
+    if (po) add("複勝", [chipOf(x)], (x.in3 / 100) * po.avg, x.in3, fmt(po.min) + "〜" + fmt(po.max) + "倍");
+  });
+  for (let i = 0; i < top.length; i++) for (let j = i + 1; j < top.length; j++) {
+    const a = top[i], b = top[j];
+    const um = poolOdds(A.pools.umaren, uKey(a.idxNum, b.idxNum));
+    if (um) { const p = A.quinella[pairKey(a.idxNum, b.idxNum)] || 0; add("馬連", [chipOf(a), chipOf(b)], p * um, p * 100, um + "倍"); }
+    const wd = poolOdds(A.pools.wide, uKey(a.idxNum, b.idxNum), true);
+    if (wd) { const p = A.wide[pairKey(a.idxNum, b.idxNum)] || 0; add("ワイド", [chipOf(a), chipOf(b)], p * wd, p * 100, fmt(wd) + "倍"); }
+  }
+  const t7 = R.slice(0, Math.min(7, R.length));
+  for (let i = 0; i < t7.length; i++) for (let j = i + 1; j < t7.length; j++) for (let k = j + 1; k < t7.length; k++) {
+    const od = poolOdds(A.pools.trio, tKey(t7[i].idxNum, t7[j].idxNum, t7[k].idxNum));
+    if (od) { const p = A.trio[trioKey(t7[i].idxNum, t7[j].idxNum, t7[k].idxNum)] || 0; add("3連複", [chipOf(t7[i]), chipOf(t7[j]), chipOf(t7[k])], p * od, p * 100, od + "倍"); }
+  }
+  return out.filter((v) => v.ev >= 1.05 && v.hit >= 2).sort((a, b) => b.ev - a.ev).slice(0, 6);
+}
+function chipOf(x) { return { num: x.idxNum, mark: "", name: x.h.name }; }
+
+/* ----------------------------- 信頼度スコア（目安） ------------------------------ */
+function confidence(A) {
+  let c = 58;
+  if (A.basis !== "odds") c -= 22;                 // オッズ未発表は信頼低
+  if (A.status === "result") c += 8;               // 確定オッズ
+  else if (A.status) c += 2;                       // 前売り等
+  if (A.overround) c += clamp((1.30 - A.overround) / 0.10 * 8, -8, 8); // 過剰率が低いほど良
+  const o = A.items[0];
+  c += clamp((o.p1 - 25) / 3, -8, 14);             // 本命が強い＝読みやすい
+  c -= clamp((A.n - 10) * 1.0, -4, 9);             // 多頭数は難
+  const conc = A.items.slice(0, 3).reduce((s, x) => s + x.p1, 0);
+  c += clamp((conc - 55) / 3, -6, 9);              // 上位集中度
+  return clamp(Math.round(c), 5, 95);
+}
+function confLabel(c) { return c >= 70 ? "高" : c >= 50 ? "中" : "低"; }
+
 /* ----------------------------- 描画 ------------------------------ */
 function chip(x, rankIdx) {
   return { num: x.idxNum, mark: MARKS[rankIdx] || "", name: x.h.name };
@@ -405,24 +507,48 @@ function renderResult(race, A) {
 
   let html = "";
 
+  const conf = confidence(A);
+
   // ヘッダー
   html += '<div class="race-head">';
   html += '<div class="rh-title">' + esc(race.place) + " " + race.race_no + "R " +
-    (race.name ? '<span class="rh-name">' + esc(race.name) + "</span>" : "") + "</div>";
+    (race.name ? '<span class="rh-name">' + esc(race.name) + "</span>" : "") +
+    '<span class="conf conf-' + confLabel(conf) + '">信頼度 ' + confLabel(conf) + " " + conf + "</span></div>";
   html += '<div class="rh-sub">' +
-    (race.course ? esc(race.course) + " ・ " : "") +
+    (race.course ? esc(race.course) + (race.direction ? "(" + esc(race.direction) + ")" : "") + " ・ " : "") +
     (race.post_time ? "発走 " + esc(race.post_time) + " ・ " : "") +
     A.n + "頭立て ・ " +
-    (A.basis === "odds" ? "確定オッズ基準" : A.basis === "pop" ? "人気順基準(オッズ未発表)" : "均等基準") +
-    (A.overround ? "（市場過剰率 " + Math.round(A.overround * 100) + "%）" : "") +
-    "</div></div>";
+    (A.basis === "odds" ? (A.status === "result" ? "確定オッズ" : "オッズ反映") : A.basis === "pop" ? "人気順(オッズ未発表)" : "均等") +
+    (A.overround ? "（過剰率 " + Math.round(A.overround * 100) + "%）" : "") +
+    "</div>";
+  // 文脈チップ（馬場・天候など。確率には混ぜず情報提示）
+  const ctx = [];
+  if (race.track_condition) ctx.push("🏟️馬場 " + esc(race.track_condition));
+  if (race.weather) ctx.push("☁️天候 " + esc(race.weather));
+  if (ctx.length) html += '<div class="cond">' + ctx.map((c) => "<span>" + c + "</span>").join("") + "</div>";
+  html += "</div>";
 
-  // Claude総評
+  // AI総評
   html += '<div class="claude-comment"><div class="cc-head">🧠 AIの予想</div>' +
     '<div class="cc-body">' + esc(raceComment(ranked, depth, A)) + "</div></div>";
 
+  // 妙味（期待値プラス）
+  const vals = valueBets(A);
+  if (vals.length) {
+    html += '<div class="section-label">🔥 妙味（実オッズ×AI確率で期待値1.0超＝割安）</div>';
+    html += '<div class="bet-box value-box">';
+    vals.forEach((v) => {
+      html += '<div class="combo-row"><span class="vtype">' + esc(v.type) + "</span>" +
+        v.tickets.map(chipHTML).join("") +
+        '<span class="value-meta">' + esc(v.oddsStr) + " ／ 的中" + v.hit.toFixed(1) +
+        "% ／ <b class='ev'>EV " + v.ev.toFixed(2) + "</b></span></div>";
+    });
+    html += '<div class="bet-note">※ EV=AI確率×実オッズ。1.0超は理論上プラス（市場の歪み）。当たりやすさ自体は的中率をご覧ください。</div>';
+    html += "</div>";
+  }
+
   // 勝ちやすい買い目
-  html += '<div class="section-label">💴 勝ちやすい買い目（的中率＝厳密確率）</div>';
+  html += '<div class="section-label">💴 勝ちやすい買い目（的中率＝厳密確率／EV=実オッズ期待値）</div>';
   html += '<div class="bets">';
   // 堅い順に並べる
   const order = { tetsuban: 0, wide: 1, umaren: 2, fuku3: 3, tan: 4, tan3: 5 };
@@ -463,9 +589,15 @@ function betCard(b) {
   }
   // サマリー
   h += '<div class="bet-summary">' + b.pts + "点 = <b>" + (b.pts * 100).toLocaleString() + "円</b>（100円/点）";
-  if (b.ev != null) h += ' ／ 期待値 <b class="' + (b.ev >= 1 ? "ev" : "") + '">' + b.ev.toFixed(2) + "</b>";
-  else if (b.payHint != null) h += " ／ 参考配当 " + fmt(b.payHint) + "倍";
-  else if (b.fair != null) h += " ／ 理論オッズ目安 " + fmt(b.fair) + "倍以上で妙味";
+  if (b.ev != null && isFinite(b.ev)) {
+    const roi = (b.ev - 1) * 100;
+    h += ' ／ 期待値 <b class="' + (b.ev >= 1 ? "ev" : "") + '">' + b.ev.toFixed(2) + "</b>" +
+      '<span class="roi ' + (roi >= 0 ? "pos" : "neg") + '">ROI ' + (roi >= 0 ? "+" : "") + roi.toFixed(0) + "%</span>";
+  } else if (b.payHint != null) {
+    h += " ／ 参考配当 " + fmt(b.payHint) + "倍";
+  } else if (b.fair != null) {
+    h += " ／ 分岐配当 " + fmt(b.fair) + "倍以上で妙味";
+  }
   h += "</div></div>";
   return h;
 }
@@ -489,10 +621,14 @@ function horseCard(x, i, maxP1, depth) {
   s += '<div class="horse-name">' + esc(h.name || "") +
     (h.sexage ? '<span class="sexage">' + esc(h.sexage) + "</span>" : "") +
     (h.popularity ? '<span class="pop">' + h.popularity + "番人気</span>" : "") + "</div>";
+  const wdiff = (h.weight_diff != null)
+    ? '（' + (h.weight_diff > 0 ? "+" : "") + h.weight_diff + (Math.abs(h.weight_diff) >= 12 ? "⚠" : "") + '）' : "";
   s += '<div class="horse-meta">' +
-    (h.jockey ? "騎手 " + esc(h.jockey) + " ／ " : "") +
-    "単勝 " + (h.win_odds ? fmt(h.win_odds) + "倍" : "-") +
-    (po ? " ／ 複勝 " + fmt(po.min) + (po.max !== po.min ? "-" + fmt(po.max) : "") + "倍" : "") + "</div>";
+    (h.waku ? '<span class="waku-dot waku-' + h.waku + '">' + h.waku + "枠</span> " : "") +
+    (h.jockey ? esc(h.jockey) + " ／ " : "") +
+    "単 " + (h.win_odds ? fmt(h.win_odds) + "倍" : "-") +
+    (po ? " ／ 複 " + fmt(po.min) + (po.max !== po.min ? "-" + fmt(po.max) : "") + "倍" : "") +
+    (h.weight ? " ／ 馬体重 " + h.weight + wdiff : "") + "</div>";
   s += '<div class="score-bar"><div style="width:' + barW + '%"></div></div>';
   s += "</div>";
   s += '<div class="horse-prob"><span class="prob-val">' + x.p1.toFixed(1) + '%</span><span class="prob-label">勝率</span></div>';
@@ -586,7 +722,8 @@ async function runPrediction() {
       setStatus("このレースの出走データを取得できませんでした（発走前でオッズ未掲載の可能性）。", true);
       return;
     }
-    const A = analyze(detail.horses);
+    const A = analyze(detail.horses, detail.pools);
+    A.status = detail.odds_status || "";
     if (A.n < 2) { setStatus("確率計算に必要なオッズ/出走データが不足しています。", true); return; }
     setStatus("");
     renderResult(meta, A);

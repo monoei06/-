@@ -108,29 +108,42 @@ async function getDay(date) {
 
 /* ----------------------------- 詳細(1レース) ------------------------------ */
 async function getRace(raceId) {
-  const oddsURL =
-    "https://race.netkeiba.com/api/api_get_jra_odds.html?race_id=" + raceId + "&type=1&action=update";
+  const base = "https://race.netkeiba.com/api/api_get_jra_odds.html?race_id=" + raceId;
+  const ref = { "Referer": "https://race.netkeiba.com/odds/index.html?race_id=" + raceId };
   const shutubaURL = "https://race.netkeiba.com/race/shutuba.html?race_id=" + raceId;
 
-  const [oddsRes, shutuba] = await Promise.all([
-    fetchText(oddsURL, "utf-8", { Referer: "https://race.netkeiba.com/odds/index.html?race_id=" + raceId }),
+  // 単複(1)・馬連(4)・ワイド(5)・3連複(7)・3連単(8) と出走表を並行取得
+  const [o1, o4, o5, o7, o8, shutuba] = await Promise.all([
+    fetchText(base + "&type=1&action=update", "utf-8", ref),
+    fetchText(base + "&type=4&action=update", "utf-8", ref).catch(() => ""),
+    fetchText(base + "&type=5&action=update", "utf-8", ref).catch(() => ""),
+    fetchText(base + "&type=7&action=update", "utf-8", ref).catch(() => ""),
+    fetchText(base + "&type=8&action=update", "utf-8", ref).catch(() => ""),
     fetchText(shutubaURL, "euc-jp").catch(() => ""),
   ]);
 
-  // オッズJSON
-  let win = {}, place = {}, official = "";
+  // 単勝/複勝オッズと状態
+  let win = {}, place = {}, official = "", status = "";
   try {
-    const oj = JSON.parse(oddsRes);
+    const oj = JSON.parse(o1);
     const od = oj && oj.data && oj.data.odds ? oj.data.odds : {};
     win = od["1"] || {};
     place = od["2"] || {};
     official = (oj && oj.data && oj.data.official_datetime) || "";
+    status = (oj && oj.status) || "";
   } catch { /* オッズ未発表でも続行 */ }
 
-  // 出走表(EUC-JP)から 馬番→馬名/騎手/性齢/斤量
-  const meta = parseShutuba(shutuba);
+  // 各馬券種オッズプール（期待値計算用）
+  const pools = {
+    umaren: poolMap(o4, "4", false),
+    wide: poolMap(o5, "5", true),
+    trio: poolMap(o7, "7", false),
+    trifecta: poolMap(o8, "8", false),
+  };
 
-  // 馬番の集合（オッズ or 出走表の和）
+  const meta = parseShutuba(shutuba);
+  const head = parseRaceHead(shutuba);
+
   const nums = new Set([...Object.keys(win), ...Object.keys(meta)].map((k) => String(parseInt(k, 10))));
   const horses = [];
   for (const ns of nums) {
@@ -140,10 +153,13 @@ async function getRace(raceId) {
     const m = meta[ns] || {};
     horses.push({
       num: Number(ns),
+      waku: m.waku != null ? m.waku : null,
       name: m.name || ("馬" + ns),
       jockey: m.jockey || "",
       sexage: m.sexage || "",
-      weight: m.weight || null,
+      weight_carry: m.weight_carry != null ? m.weight_carry : null,
+      weight: m.weight != null ? m.weight : null,
+      weight_diff: m.weight_diff != null ? m.weight_diff : null,
       win_odds: w ? num(w[0]) : null,
       place_min: p ? num(p[0]) : null,
       place_max: p ? num(p[1]) : null,
@@ -153,9 +169,6 @@ async function getRace(raceId) {
   horses.sort((a, b) => a.num - b.num);
 
   const pp = raceId.slice(4, 6);
-  // 出走表からレース名/距離（一覧と二重化のフォールバック）
-  const head = parseRaceHead(shutuba);
-
   return {
     race_id: raceId,
     place_code: pp,
@@ -163,55 +176,84 @@ async function getRace(raceId) {
     race_no: Number(raceId.slice(10, 12)),
     name: head.name || "",
     course: head.course || "",
+    surface: head.surface || "",
+    distance: head.distance || null,
+    direction: head.direction || "",
+    weather: head.weather || "",
+    track_condition: head.track_condition || "",
     post_time: head.post_time || "",
     official_datetime: official,
+    odds_status: status,
     has_odds: horses.some((h) => h.win_odds > 0),
+    pools,
     horses,
-    source: "netkeiba odds API + shutuba",
+    source: "netkeiba odds API(1/4/5/7/8) + shutuba",
   };
 }
 
-// 出走表HTML(EUC-JP→UTF-8済)から 馬番→{name,jockey,sexage,weight}
+// オッズプールJSON → { comboKey: odds }（range=true なら [min,max]）
+function poolMap(text, key, isRange) {
+  const out = {};
+  if (!text) return out;
+  try {
+    const oj = JSON.parse(text);
+    const od = oj && oj.data && oj.data.odds ? oj.data.odds[key] : null;
+    if (!od) return out;
+    for (const k in od) {
+      const v = od[k];
+      out[k] = isRange ? [num(v[0]), num(v[1])] : num(v[0]);
+    }
+  } catch { /* プール未発売でも続行 */ }
+  return out;
+}
+
+// 出走表HTML(EUC-JP→UTF-8済)を行ごとに分解して 馬番→各種フィールド
 function parseShutuba(html) {
   const out = {};
   if (!html) return out;
-  // 行構造: Umaban → HorseInfo(span.HorseName) → Barei(性齢) → Txt_C(斤量) → Jockey
-  const re =
-    /<td class="Umaban\d+[^"]*">\s*(\d+)\s*<\/td>[\s\S]*?<span class="HorseName"><a[^>]*title="([^"]+)"[\s\S]*?<td class="Barei[^"]*">([^<]*)<\/td>\s*<td class="Txt_C">([^<]*)<\/td>\s*<td class="Jockey">\s*<a[^>]*>\s*([^<]+?)\s*<\/a>/g;
-  let m;
-  while ((m = re.exec(html))) {
-    const n = String(parseInt(m[1], 10));
+  const rows = html.split(/<tr class="HorseList/);
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const um = r.match(/<td class="Umaban\d+[^"]*">\s*(\d+)\s*</);
+    if (!um) continue;
+    const n = String(parseInt(um[1], 10));
+    const waku = r.match(/Waku(\d+)/);
+    const nm = r.match(/<span class="HorseName"><a[^>]*title="([^"]+)"/);
+    const ba = r.match(/<td class="Barei[^"]*">([^<]*)</);
+    const kin = r.match(/<td class="Txt_C">([\d.]+)<\/td>/);
+    const jk = r.match(/<td class="Jockey">\s*<a[^>]*>\s*([^<]+?)\s*</);
+    const wt = r.match(/<td class="Weight">\s*(\d+)?\s*(?:<small>\(([-+]?\d+)\)<\/small>)?/);
     out[n] = {
-      name: decodeEnt(m[2]).trim(),
-      sexage: decodeEnt(m[3]).trim(),
-      weight: num(m[4]),
-      jockey: decodeEnt(m[5]).trim(),
+      waku: waku ? Number(waku[1]) : null,
+      name: nm ? decodeEnt(nm[1]).trim() : ("馬" + n),
+      sexage: ba ? decodeEnt(ba[1]).trim() : "",
+      weight_carry: kin ? num(kin[1]) : null,
+      jockey: jk ? decodeEnt(jk[1]).trim() : "",
+      weight: wt && wt[1] ? num(wt[1]) : null,
+      weight_diff: wt && wt[2] != null ? num(wt[2]) : null,
     };
-  }
-  // フォールバック: 上の厳密版が取れない場合は馬番と馬名だけでも対応付ける
-  if (Object.keys(out).length === 0) {
-    const nums = [...html.matchAll(/<td class="Umaban\d+[^"]*">\s*(\d+)\s*<\/td>/g)].map((x) => parseInt(x[1], 10));
-    const names = [...html.matchAll(/<span class="HorseName"><a[^>]*title="([^"]+)"/g)].map((x) => decodeEnt(x[1]).trim());
-    for (let i = 0; i < Math.min(nums.length, names.length); i++) out[String(nums[i])] = { name: names[i] };
   }
   return out;
 }
 
-// 出走表HTMLからレース名・距離・発走時刻
+// 出走表HTMLからレース名・コース・馬場・天候など
 function parseRaceHead(html) {
   if (!html) return {};
   const name = pick(html, /RaceName[^>]*>\s*([^<]+?)\s*</) || pick(html, /<title>([^|<]+)/);
   const data = pick(html, /<div class="RaceData01">([\s\S]*?)<\/div>/);
-  let course = "", post_time = "";
+  let course = "", post_time = "", surface = "", distance = null, direction = "", weather = "", track = "";
   if (data) {
-    const t = stripTags(data).replace(/\s+/g, " ");
-    const cm = t.match(/(芝|ダ|障)[^\d]*\d+m/);
-    if (cm) course = cm[0].replace(/\s/g, "");
-    const pm = t.match(/(\d{1,2}:\d{2})/);
-    if (pm) post_time = pm[1];
+    const t = stripTags(data).replace(/&nbsp;/g, " ").replace(/\s+/g, " ");
+    const cm = t.match(/(芝|ダ|障)[^\d]*(\d+)m/);
+    if (cm) { surface = cm[1]; distance = Number(cm[2]); course = cm[1] + cm[2] + "m"; }
+    const dm = t.match(/[(（](左|右|直)/); if (dm) direction = dm[1];
+    const pm = t.match(/(\d{1,2}:\d{2})/); if (pm) post_time = pm[1];
+    const wm = t.match(/天候\s*[:：]\s*(\S)/); if (wm) weather = wm[1];
+    const tm = t.match(/馬場\s*[:：]\s*(\S)/); if (tm) track = expandTrack(tm[1]);
   }
-  return { name: name ? decodeEnt(name).trim() : "", course, post_time };
+  return { name: name ? decodeEnt(name).trim() : "", course, surface, distance, direction, post_time, weather, track_condition: track };
 }
+function expandTrack(c) { return ({ "良": "良", "稍": "稍重", "重": "重", "不": "不良" })[c] || c; }
 
 /* ----------------------------- 共通ユーティリティ ------------------------------ */
 async function fetchText(target, enc, extraHeaders) {
@@ -243,7 +285,7 @@ async function fetchText(target, enc, extraHeaders) {
 }
 
 function num(v) {
-  const n = parseFloat(String(v));
+  const n = parseFloat(String(v).replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
 }
 function stripTags(s) { return String(s).replace(/<[^>]*>/g, ""); }

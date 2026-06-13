@@ -77,21 +77,45 @@ function getDay_(date) {
 }
 
 function getRace_(raceId) {
-  var oddsURL = "https://race.netkeiba.com/api/api_get_jra_odds.html?race_id=" + raceId + "&type=1&action=update";
+  var base = "https://race.netkeiba.com/api/api_get_jra_odds.html?race_id=" + raceId;
+  var ref = "https://race.netkeiba.com/odds/index.html?race_id=" + raceId;
   var shutubaURL = "https://race.netkeiba.com/race/shutuba.html?race_id=" + raceId;
+  var H = {
+    "User-Agent": UA_, "Accept-Language": "ja,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Referer": ref
+  };
+  // 単複(1)・馬連(4)・ワイド(5)・3連複(7)・3連単(8)・出走表 を並行取得
+  var reqs = [
+    { url: base + "&type=1&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
+    { url: base + "&type=4&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
+    { url: base + "&type=5&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
+    { url: base + "&type=7&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
+    { url: base + "&type=8&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
+    { url: shutubaURL, headers: { "User-Agent": UA_, "Accept-Language": "ja" }, muteHttpExceptions: true, followRedirects: true }
+  ];
+  var res = UrlFetchApp.fetchAll(reqs);
+  if (res[0].getResponseCode() !== 200) throw new Error("netkeiba HTTP " + res[0].getResponseCode());
 
-  var oddsRes = fetchText_(oddsURL, "UTF-8", { "Referer": "https://race.netkeiba.com/odds/index.html?race_id=" + raceId });
+  var o1 = res[0].getContentText("UTF-8");
   var shutuba = "";
-  try { shutuba = fetchText_(shutubaURL, "EUC-JP", null); } catch (e) { shutuba = ""; }
+  try { shutuba = res[5].getContentText("EUC-JP"); } catch (e) { shutuba = ""; }
 
-  var win = {}, place = {}, official = "";
+  var win = {}, place = {}, official = "", status = "";
   try {
-    var oj = JSON.parse(oddsRes);
+    var oj = JSON.parse(o1);
     var od = (oj && oj.data && oj.data.odds) ? oj.data.odds : {};
     win = od["1"] || {};
     place = od["2"] || {};
     official = (oj && oj.data && oj.data.official_datetime) || "";
+    status = (oj && oj.status) || "";
   } catch (e2) { /* オッズ未発表でも続行 */ }
+
+  var pools = {
+    umaren: poolMap_(textOf_(res[1]), "4", false),
+    wide: poolMap_(textOf_(res[2]), "5", true),
+    trio: poolMap_(textOf_(res[3]), "7", false),
+    trifecta: poolMap_(textOf_(res[4]), "8", false)
+  };
 
   var meta = parseShutuba_(shutuba);
   var head = parseRaceHead_(shutuba);
@@ -107,8 +131,11 @@ function getRace_(raceId) {
     var p = place[pad] || place[ns];
     var m = meta[ns] || {};
     horses.push({
-      num: Number(ns), name: m.name || ("馬" + ns), jockey: m.jockey || "",
-      sexage: m.sexage || "", weight: m.weight || null,
+      num: Number(ns), waku: m.waku != null ? m.waku : null, name: m.name || ("馬" + ns),
+      jockey: m.jockey || "", sexage: m.sexage || "",
+      weight_carry: m.weight_carry != null ? m.weight_carry : null,
+      weight: m.weight != null ? m.weight : null,
+      weight_diff: m.weight_diff != null ? m.weight_diff : null,
       win_odds: w ? num_(w[0]) : null,
       place_min: p ? num_(p[0]) : null,
       place_max: p ? num_(p[1]) : null,
@@ -124,26 +151,56 @@ function getRace_(raceId) {
   return {
     race_id: raceId, place_code: pp, place: PLACE_[pp] || ("場" + pp),
     race_no: Number(raceId.substring(10, 12)), name: head.name || "", course: head.course || "",
-    post_time: head.post_time || "", official_datetime: official, has_odds: hasOdds,
-    horses: horses, source: "netkeiba odds+shutuba (GAS)"
+    surface: head.surface || "", distance: head.distance || null, direction: head.direction || "",
+    weather: head.weather || "", track_condition: head.track_condition || "",
+    post_time: head.post_time || "", official_datetime: official, odds_status: status,
+    has_odds: hasOdds, pools: pools, horses: horses, source: "netkeiba odds(1/4/5/7/8)+shutuba (GAS)"
   };
+}
+
+function textOf_(res) {
+  try { return res.getResponseCode() === 200 ? res.getContentText("UTF-8") : ""; } catch (e) { return ""; }
+}
+
+function poolMap_(text, key, isRange) {
+  var out = {};
+  if (!text) return out;
+  try {
+    var oj = JSON.parse(text);
+    var od = (oj && oj.data && oj.data.odds) ? oj.data.odds[key] : null;
+    if (!od) return out;
+    for (var k in od) {
+      var v = od[k];
+      out[k] = isRange ? [num_(v[0]), num_(v[1])] : num_(v[0]);
+    }
+  } catch (e) { /* 未発売でも続行 */ }
+  return out;
 }
 
 function parseShutuba_(html) {
   var out = {};
   if (!html) return out;
-  var re = /<td class="Umaban\d+[^"]*">\s*(\d+)\s*<\/td>[\s\S]*?<span class="HorseName"><a[^>]*title="([^"]+)"[\s\S]*?<td class="Barei[^"]*">([^<]*)<\/td>\s*<td class="Txt_C">([^<]*)<\/td>\s*<td class="Jockey">\s*<a[^>]*>\s*([^<]+?)\s*<\/a>/g;
-  var m;
-  while ((m = re.exec(html))) {
-    var n = String(parseInt(m[1], 10));
-    out[n] = { name: trim_(decodeEnt_(m[2])), sexage: trim_(m[3]), weight: num_(m[4]), jockey: trim_(decodeEnt_(m[5])) };
-  }
-  if (isEmpty_(out)) {
-    var nre = /<td class="Umaban\d+[^"]*">\s*(\d+)\s*<\/td>/g, hre = /<span class="HorseName"><a[^>]*title="([^"]+)"/g;
-    var nums = [], names = [], x;
-    while ((x = nre.exec(html))) nums.push(parseInt(x[1], 10));
-    while ((x = hre.exec(html))) names.push(trim_(decodeEnt_(x[1])));
-    for (var i = 0; i < Math.min(nums.length, names.length); i++) out[String(nums[i])] = { name: names[i] };
+  var rows = html.split(/<tr class="HorseList/);
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    var um = r.match(/<td class="Umaban\d+[^"]*">\s*(\d+)\s*</);
+    if (!um) continue;
+    var n = String(parseInt(um[1], 10));
+    var waku = r.match(/Waku(\d+)/);
+    var nm = r.match(/<span class="HorseName"><a[^>]*title="([^"]+)"/);
+    var ba = r.match(/<td class="Barei[^"]*">([^<]*)</);
+    var kin = r.match(/<td class="Txt_C">([\d.]+)<\/td>/);
+    var jk = r.match(/<td class="Jockey">\s*<a[^>]*>\s*([^<]+?)\s*</);
+    var wt = r.match(/<td class="Weight">\s*(\d+)?\s*(?:<small>\(([-+]?\d+)\)<\/small>)?/);
+    out[n] = {
+      waku: waku ? Number(waku[1]) : null,
+      name: nm ? trim_(decodeEnt_(nm[1])) : ("馬" + n),
+      sexage: ba ? trim_(decodeEnt_(ba[1])) : "",
+      weight_carry: kin ? num_(kin[1]) : null,
+      jockey: jk ? trim_(decodeEnt_(jk[1])) : "",
+      weight: wt && wt[1] ? num_(wt[1]) : null,
+      weight_diff: wt && wt[2] != null ? num_(wt[2]) : null
+    };
   }
   return out;
 }
@@ -152,16 +209,19 @@ function parseRaceHead_(html) {
   if (!html) return {};
   var name = pick_(html, /RaceName[^>]*>\s*([^<]+?)\s*</) || pick_(html, /<title>([^|<]+)/);
   var data = pick_(html, /<div class="RaceData01">([\s\S]*?)<\/div>/);
-  var course = "", post_time = "";
+  var course = "", post_time = "", surface = "", distance = null, direction = "", weather = "", track = "";
   if (data) {
-    var t = stripTags_(data).replace(/\s+/g, " ");
-    var cm = t.match(/(芝|ダ|障)[^\d]*\d+m/);
-    if (cm) course = cm[0].replace(/\s/g, "");
-    var pm = t.match(/(\d{1,2}:\d{2})/);
-    if (pm) post_time = pm[1];
+    var t = stripTags_(data).replace(/&nbsp;/g, " ").replace(/\s+/g, " ");
+    var cm = t.match(/(芝|ダ|障)[^\d]*(\d+)m/);
+    if (cm) { surface = cm[1]; distance = Number(cm[2]); course = cm[1] + cm[2] + "m"; }
+    var dm = t.match(/[(（](左|右|直)/); if (dm) direction = dm[1];
+    var pm = t.match(/(\d{1,2}:\d{2})/); if (pm) post_time = pm[1];
+    var wm = t.match(/天候\s*[:：]\s*(\S)/); if (wm) weather = wm[1];
+    var tm = t.match(/馬場\s*[:：]\s*(\S)/); if (tm) track = expandTrack_(tm[1]);
   }
-  return { name: name ? trim_(decodeEnt_(name)) : "", course: course, post_time: post_time };
+  return { name: name ? trim_(decodeEnt_(name)) : "", course: course, surface: surface, distance: distance, direction: direction, post_time: post_time, weather: weather, track_condition: track };
 }
+function expandTrack_(c) { var m = { "良": "良", "稍": "稍重", "重": "重", "不": "不良" }; return m[c] || c; }
 
 function fetchText_(url, enc, extra) {
   var headers = {
@@ -182,7 +242,7 @@ function todayJST_() {
   return String(d.getUTCFullYear()) + mm + dd;
 }
 
-function num_(v) { var n = parseFloat(String(v)); return isFinite(n) ? n : null; }
+function num_(v) { var n = parseFloat(String(v).replace(/,/g, "")); return isFinite(n) ? n : null; }
 function stripTags_(s) { return String(s).replace(/<[^>]*>/g, ""); }
 function trim_(s) { return String(s).replace(/^\s+|\s+$/g, ""); }
 function pick_(html, rx) { var m = String(html).match(rx); return m ? m[1] : ""; }

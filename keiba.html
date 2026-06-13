@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#1b5e20" />
+<meta name="description" content="中央競馬(JRA)の本日全レースを、市場オッズに基づく厳密確率計算で予想。勝ちやすい馬券（単勝・複勝・ワイド・馬連・3連複・3連単）を自動提案します。" />
+<title>🐎 中央競馬AI予想</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐎</text></svg>" />
+<link rel="manifest" href="keiba-manifest.json" />
+<link rel="stylesheet" href="keiba.css" />
+</head>
+<body>
+<header class="app-header">
+  <h1>🐎 中央競馬AI予想</h1>
+  <p class="subtitle">JRA 全レース・市場オッズ厳密確率で「勝ちやすい馬券」を提案</p>
+</header>
+
+<main id="app">
+  <section class="controls">
+    <div class="control-row">
+      <label for="venue">開催</label>
+      <select id="venue" disabled><option>読み込み中…</option></select>
+    </div>
+    <div class="control-row">
+      <label for="race">レース</label>
+      <select id="race" disabled><option>—</option></select>
+    </div>
+    <div class="btn-row">
+      <button id="predict" class="predict-btn" disabled>予想する</button>
+      <button id="refresh" class="refresh-btn" title="最新オッズ・出走表を再取得">🔄</button>
+    </div>
+    <details class="settings">
+      <summary>⚙️ データサーバー設定（必須・最初に一度だけ）</summary>
+      <input id="proxyUrl" type="url" inputmode="url" autocapitalize="off" autocomplete="off"
+             placeholder="https://xxxxx.workers.dev" />
+      <p class="hint">中央競馬には公式の無料JSON APIが無いため、netkeiba から出走表・オッズを取得する
+      <b>データサーバー（Cloudflare Workers / 無料）</b>を一度だけ用意し、その URL を貼り付けます。
+      設定方法は <code>worker/KEIBA-README.md</code> を参照。設定後は保存され、以後そのまま使えます。</p>
+    </details>
+  </section>
+
+  <div id="status" class="status"></div>
+  <section id="result" class="result" hidden></section>
+</main>
+
+<footer class="app-footer">
+  <p><a href="index.html">🚤 ボートレース予想はこちら</a></p>
+  <p>データ取得元: <a href="https://race.netkeiba.com/" target="_blank" rel="noopener">netkeiba</a>（公開ページ・オッズ）</p>
+  <p class="disclaimer">※ 本アプリの予想は公開オッズ等に基づく自動計算であり、的中・利益を保証するものではありません。馬券の購入は自己責任で。<b>20歳未満は馬券を購入できません。</b></p>
+  <p class="version" id="version"></p>
+</footer>
+
+<script src="keiba.js"></script>
+</body>
+</html>

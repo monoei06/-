@@ -111,16 +111,19 @@ async function getRace(raceId) {
   const base = "https://race.netkeiba.com/api/api_get_jra_odds.html?race_id=" + raceId;
   const ref = { "Referer": "https://race.netkeiba.com/odds/index.html?race_id=" + raceId };
   const shutubaURL = "https://race.netkeiba.com/race/shutuba.html?race_id=" + raceId;
+  const pastURL = "https://race.netkeiba.com/race/shutuba_past.html?race_id=" + raceId;
 
-  // 単複(1)・馬連(4)・ワイド(5)・3連複(7)・3連単(8) と出走表を並行取得
-  const [o1, o4, o5, o7, o8, shutuba] = await Promise.all([
+  // 単複(1)・馬連(4)・ワイド(5)・3連複(7)・3連単(8)・出走表・馬柱(近走) を並行取得
+  const [o1, o4, o5, o7, o8, shutuba, spast] = await Promise.all([
     fetchText(base + "&type=1&action=update", "utf-8", ref),
     fetchText(base + "&type=4&action=update", "utf-8", ref).catch(() => ""),
     fetchText(base + "&type=5&action=update", "utf-8", ref).catch(() => ""),
     fetchText(base + "&type=7&action=update", "utf-8", ref).catch(() => ""),
     fetchText(base + "&type=8&action=update", "utf-8", ref).catch(() => ""),
     fetchText(shutubaURL, "euc-jp").catch(() => ""),
+    fetchText(pastURL, "euc-jp").catch(() => ""),
   ]);
+  const pastMap = parsePast(spast);
 
   // 単勝/複勝オッズと状態
   let win = {}, place = {}, official = "", status = "";
@@ -164,6 +167,7 @@ async function getRace(raceId) {
       place_min: p ? num(p[0]) : null,
       place_max: p ? num(p[1]) : null,
       popularity: w ? (parseInt(w[2], 10) || null) : (p ? parseInt(p[2], 10) || null : null),
+      past: pastMap[ns] || [],
     });
   }
   horses.sort((a, b) => a.num - b.num);
@@ -232,6 +236,50 @@ function parseShutuba(html) {
       weight: wt && wt[1] ? num(wt[1]) : null,
       weight_diff: wt && wt[2] != null ? num(wt[2]) : null,
     };
+  }
+  return out;
+}
+
+// 馬柱(shutuba_past)から 馬番→近走配列（最大5走）。着順は非掲載のため時計・上がり等を抽出。
+function parsePast(html) {
+  const out = {};
+  if (!html) return out;
+  const rows = html.split(/<tr class="HorseList/);
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const um = r.match(/<td class="Waku">\s*(\d+)\s*<\/td>/);
+    if (!um) continue;
+    const n = String(parseInt(um[1], 10));
+    const arr = [];
+    const cells = r.match(/<td class="Past"[^>]*>[\s\S]*?<\/td>/g) || [];
+    for (const c of cells) {
+      const d05 = pick(c, /<div class="Data05">([\s\S]*?)<\/div>/);
+      if (!d05) continue;
+      const t05 = stripTags(d05).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      const cm = t05.match(/(芝|ダ|障)(\d+)\s+(\d):(\d{2})\.(\d)\s*(\S)?/);
+      if (!cm) continue;
+      const d01 = stripTags(pick(c, /<div class="Data01">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      const klass = stripTags(pick(c, /<div class="Data02">([\s\S]*?)<\/div>/)).replace(/\s+/g, " ").trim();
+      const d03 = stripTags(pick(c, /<div class="Data03">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      const d06 = stripTags(pick(c, /<div class="Data06">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      const d07 = stripTags(pick(c, /<div class="Data07">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      const dm = d01.match(/([\d.]+)\s+(\S+)/);
+      const fld = d03.match(/(\d+)頭/);
+      const pop = d03.match(/(\d+)人/);
+      const ag = d06.match(/\((\d{2}\.\d)\)/);
+      const bw = d06.match(/(\d{3})\(([-+]?\d+)\)/);
+      const mg = d07.match(/\((-?[\d.]+)\)/);
+      arr.push({
+        ymd: dm ? dm[1] : "", place: dm ? dm[2] : "", klass,
+        surface: cm[1], dist: Number(cm[2]),
+        sec: Number(cm[3]) * 60 + Number(cm[4]) + Number(cm[5]) / 10,
+        going: cm[6] || "", field: fld ? Number(fld[1]) : null, pop: pop ? Number(pop[1]) : null,
+        agari: ag ? Number(ag[1]) : null, body: bw ? Number(bw[1]) : null, bdiff: bw ? Number(bw[2]) : null,
+        margin: mg ? Number(mg[1]) : null,
+      });
+      if (arr.length >= 5) break;
+    }
+    if (arr.length) out[n] = arr;
   }
   return out;
 }

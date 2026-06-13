@@ -80,25 +80,30 @@ function getRace_(raceId) {
   var base = "https://race.netkeiba.com/api/api_get_jra_odds.html?race_id=" + raceId;
   var ref = "https://race.netkeiba.com/odds/index.html?race_id=" + raceId;
   var shutubaURL = "https://race.netkeiba.com/race/shutuba.html?race_id=" + raceId;
+  var pastURL = "https://race.netkeiba.com/race/shutuba_past.html?race_id=" + raceId;
   var H = {
     "User-Agent": UA_, "Accept-Language": "ja,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Referer": ref
   };
-  // 単複(1)・馬連(4)・ワイド(5)・3連複(7)・3連単(8)・出走表 を並行取得
+  var HS = { "User-Agent": UA_, "Accept-Language": "ja" };
+  // 単複(1)・馬連(4)・ワイド(5)・3連複(7)・3連単(8)・出走表・馬柱(近走) を並行取得
   var reqs = [
     { url: base + "&type=1&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
     { url: base + "&type=4&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
     { url: base + "&type=5&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
     { url: base + "&type=7&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
     { url: base + "&type=8&action=update", headers: H, muteHttpExceptions: true, followRedirects: true },
-    { url: shutubaURL, headers: { "User-Agent": UA_, "Accept-Language": "ja" }, muteHttpExceptions: true, followRedirects: true }
+    { url: shutubaURL, headers: HS, muteHttpExceptions: true, followRedirects: true },
+    { url: pastURL, headers: HS, muteHttpExceptions: true, followRedirects: true }
   ];
   var res = UrlFetchApp.fetchAll(reqs);
   if (res[0].getResponseCode() !== 200) throw new Error("netkeiba HTTP " + res[0].getResponseCode());
 
   var o1 = res[0].getContentText("UTF-8");
-  var shutuba = "";
+  var shutuba = "", spast = "";
   try { shutuba = res[5].getContentText("EUC-JP"); } catch (e) { shutuba = ""; }
+  try { spast = res[6].getContentText("EUC-JP"); } catch (e2) { spast = ""; }
+  var pastMap = parsePast_(spast);
 
   var win = {}, place = {}, official = "", status = "";
   try {
@@ -139,7 +144,8 @@ function getRace_(raceId) {
       win_odds: w ? num_(w[0]) : null,
       place_min: p ? num_(p[0]) : null,
       place_max: p ? num_(p[1]) : null,
-      popularity: w ? (parseInt(w[2], 10) || null) : (p ? parseInt(p[2], 10) || null : null)
+      popularity: w ? (parseInt(w[2], 10) || null) : (p ? parseInt(p[2], 10) || null : null),
+      past: pastMap[ns] || []
     });
   }
   horses.sort(function (a, b) { return a.num - b.num; });
@@ -201,6 +207,46 @@ function parseShutuba_(html) {
       weight: wt && wt[1] ? num_(wt[1]) : null,
       weight_diff: wt && wt[2] != null ? num_(wt[2]) : null
     };
+  }
+  return out;
+}
+
+function parsePast_(html) {
+  var out = {};
+  if (!html) return out;
+  var rows = html.split(/<tr class="HorseList/);
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    var um = r.match(/<td class="Waku">\s*(\d+)\s*<\/td>/);
+    if (!um) continue;
+    var n = String(parseInt(um[1], 10));
+    var arr = [];
+    var cells = r.match(/<td class="Past"[^>]*>[\s\S]*?<\/td>/g) || [];
+    for (var j = 0; j < cells.length; j++) {
+      var c = cells[j];
+      var d05 = pick_(c, /<div class="Data05">([\s\S]*?)<\/div>/);
+      if (!d05) continue;
+      var t05 = stripTags_(d05).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+      var cm = t05.match(/(芝|ダ|障)(\d+)\s+(\d):(\d{2})\.(\d)\s*(\S)?/);
+      if (!cm) continue;
+      var d01 = stripTags_(pick_(c, /<div class="Data01">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+      var klass = stripTags_(pick_(c, /<div class="Data02">([\s\S]*?)<\/div>/)).replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+      var d03 = stripTags_(pick_(c, /<div class="Data03">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+      var d06 = stripTags_(pick_(c, /<div class="Data06">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+      var d07 = stripTags_(pick_(c, /<div class="Data07">([\s\S]*?)<\/div>/)).replace(/&nbsp;/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+      var dm = d01.match(/([\d.]+)\s+(\S+)/), fld = d03.match(/(\d+)頭/), pop = d03.match(/(\d+)人/),
+        ag = d06.match(/\((\d{2}\.\d)\)/), bw = d06.match(/(\d{3})\(([-+]?\d+)\)/), mg = d07.match(/\((-?[\d.]+)\)/);
+      arr.push({
+        ymd: dm ? dm[1] : "", place: dm ? dm[2] : "", klass: klass,
+        surface: cm[1], dist: Number(cm[2]),
+        sec: Number(cm[3]) * 60 + Number(cm[4]) + Number(cm[5]) / 10,
+        going: cm[6] || "", field: fld ? Number(fld[1]) : null, pop: pop ? Number(pop[1]) : null,
+        agari: ag ? Number(ag[1]) : null, body: bw ? Number(bw[1]) : null, bdiff: bw ? Number(bw[2]) : null,
+        margin: mg ? Number(mg[1]) : null
+      });
+      if (arr.length >= 5) break;
+    }
+    if (arr.length) out[n] = arr;
   }
   return out;
 }

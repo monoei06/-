@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v4（本命バイアス除去・スタンス選択）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v5（スタンス＋近走スピード指数 参考表示）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -453,6 +453,35 @@ function placeOddsOf(h) {
   return { min: h.place_min, max, avg: (h.place_min + max) / 2 };
 }
 
+/* ----------------------------- 近走スピード指数（参考・確率には不使用） ------------------------------ */
+// 直近81Rの回帰から得た基準タイム（秒）。芝/ダの距離一次近似。あくまで参考値。
+const GOING_OFF = { "良": 0, "稍": 0.5, "重": 1.0, "不": 1.5 };
+function parTimeSec(surface, dist) {
+  if (surface === "芝") return 0.0643 * dist - 9.6;
+  if (surface === "ダ") return 0.0697 * dist - 13.9;
+  return null; // 障害などは対象外
+}
+// スピード指数：基準タイムより速いほど高い（+10 ≒ 1.0秒速い）
+function speedFigure(p) {
+  const par = parTimeSec(p.surface, p.dist);
+  if (par == null || !p.sec) return null;
+  const go = GOING_OFF[p.going] != null ? GOING_OFF[p.going] : 0;
+  return Math.round(((par + go) - p.sec) * 10);
+}
+function pastSummary(past) {
+  if (!past || !past.length) return null;
+  const figs = past.map(speedFigure).filter((v) => v != null);
+  if (!figs.length) return { figs: [], best: null, avg: null, trend: 0 };
+  const best = Math.max.apply(null, figs);
+  const avg = Math.round(figs.reduce((a, b) => a + b, 0) / figs.length);
+  let trend = 0;
+  if (figs.length >= 2) {
+    const older = figs.slice(1).reduce((a, b) => a + b, 0) / (figs.length - 1);
+    trend = Math.round(figs[0] - older); // 前走 − それ以前平均
+  }
+  return { figs, best, avg, trend };
+}
+
 /* ----------------------------- 妙味（期待値プラス）探索 ------------------------------ */
 // 各馬券種の実オッズ × モデル確率で期待値を計算し、+EV（割安＝市場の歪み）を発掘する。
 // モデル確率は単勝プール由来。各馬券プールがそれと食い違って厚い配当を出している点を拾う。
@@ -644,8 +673,35 @@ function horseCard(x, i, maxP1, depth) {
     (h.win_odds ? "<span>単勝期待値 <b class='" + ((x.p1 / 100 * h.win_odds) >= 1 ? "ev" : "") + "'>" +
       (x.p1 / 100 * h.win_odds).toFixed(2) + "</b></span>" : "") +
     "</div>";
+  s += renderPast(h);
   s += "</div>";
   return s;
+}
+
+// 近走（参考情報）。確率計算には使わない。
+function renderPast(h) {
+  const past = h.past;
+  if (!past || !past.length) return "";
+  const sum = pastSummary(past);
+  let badge = "";
+  if (sum && sum.trend >= 5) badge = '<span class="trend up">↑上昇</span>';
+  else if (sum && sum.trend <= -5) badge = '<span class="trend down">↓下降</span>';
+  let html = '<details class="past"><summary>📋 近走（参考）' +
+    (sum && sum.best != null ? ' <span class="figbest">指数best ' + sum.best + "</span>" : "") + badge + "</summary>";
+  html += '<div class="past-list">';
+  past.forEach((p) => {
+    const f = speedFigure(p);
+    html += '<div class="past-row">' +
+      '<span class="pdate">' + esc((p.ymd || "").slice(5)) + "</span>" +
+      '<span class="pcourse">' + esc(p.place) + " " + esc(p.surface) + p.dist + esc(p.going || "") + "</span>" +
+      '<span class="pmeta">' + (p.field ? p.field + "頭" : "") + (p.pop ? " " + p.pop + "人気" : "") +
+      (p.agari != null ? " 上り" + p.agari : "") + (p.bdiff != null ? " 体" + (p.bdiff > 0 ? "+" : "") + p.bdiff : "") + "</span>" +
+      '<span class="pfig">' + (f != null ? "指数" + f : "") + "</span>" +
+      "</div>";
+  });
+  html += '<div class="bet-note">※ 指数=基準タイム比の参考値（馬場/クラス未補正）。予想確率には使っていません。</div>';
+  html += "</div></details>";
+  return html;
 }
 
 function renderTopTrifecta(A) {

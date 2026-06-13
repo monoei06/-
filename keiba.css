@@ -176,6 +176,19 @@ input[type="date"] {
 .horse-detail { grid-column: 2 / 5; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .76rem; color: var(--muted); margin-top: 2px; }
 .horse-detail b { color: var(--text); }
 .horse-detail b.ev, .ev { color: var(--good) !important; }
+.past { grid-column: 1 / -1; margin-top: 6px; font-size: .76rem; }
+.past summary { cursor: pointer; color: var(--green); font-weight: 700; padding: 4px 0; list-style: none; }
+.past summary::-webkit-details-marker { display: none; }
+.past .figbest { color: var(--muted); font-weight: 600; margin-left: 4px; }
+.trend { font-size: .7rem; font-weight: 800; padding: 1px 6px; border-radius: 5px; margin-left: 6px; }
+.trend.up { background: #e3f5e9; color: var(--good); }
+.trend.down { background: #f3eeee; color: #9a6b6b; }
+.past-list { margin-top: 4px; }
+.past-row { display: flex; gap: 8px; padding: 3px 0; border-top: 1px solid var(--line); color: var(--muted); }
+.past-row .pdate { width: 42px; flex-shrink: 0; }
+.past-row .pcourse { width: 88px; flex-shrink: 0; color: var(--text); }
+.past-row .pmeta { flex: 1; }
+.past-row .pfig { font-weight: 700; color: var(--green); white-space: nowrap; }
 
 /* 3連単 上位 */
 .combo-row { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .85rem; }

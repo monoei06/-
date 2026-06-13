@@ -12,7 +12,7 @@ const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 const RESULTS_URL = "https://boatraceopenapi.github.io/results/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 場の傾向(堅い/荒れ)対応 (v13)";
+const APP_VERSION = "2026-06-13 着順別モデル(2-3着精度向上) (v14)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -36,6 +36,11 @@ const GRADES = { 1: "SG", 2: "G1", 3: "G2", 4: "G3", 5: "一般" };
 const COURSE_BASE = { 1: 0.596, 2: 0.123, 3: 0.116, 4: 0.092, 5: 0.057, 6: 0.016 };
 // 3着内率（参考・コメント用）
 const COURSE_IN3 = { 1: 0.82, 2: 0.60, 3: 0.52, 4: 0.44, 5: 0.40, 6: 0.23 };
+
+// 着順別のコース分布（実測5800レース）。2着・3着は1着より遥かにフラット＝外側も来る。
+// 着順ごとに別の強度を使う（位置別プラケット・ルース）ことで2着3着の精度を上げる。
+const POS_BASE2 = { 1: 0.163, 2: 0.251, 3: 0.221, 4: 0.165, 5: 0.133, 6: 0.067 };
+const POS_BASE3 = { 1: 0.091, 2: 0.190, 3: 0.197, 4: 0.202, 5: 0.190, 6: 0.130 };
 
 // 競艇場ごとの進入コース別1着率（直近約40日の実測）。
 // 場の個性（堅い／荒れる）を反映。1コース率が高い場ほど堅い。
@@ -89,7 +94,9 @@ const ABILITY_W = {
 };
 
 // 強度モデルのパラメータ（実データのバックテストで最適化）
-const BETA = 0.6;   // 能力差の効き具合（大きいほど能力重視／小さいほどコース重視）
+const BETA = 0.6;    // 1着での能力差の効き具合（大きいほど能力重視／小さいほどコース重視）
+const BETA2 = 0.55;  // 2着での能力差の効き
+const BETA3 = 0.45;  // 3着での能力差の効き
 const W_PRE = 0.2;  // 直前（展示）の能力への反映ウェイト（0=無視, 1=展示のみ）
 const VENUE_BLEND = 0.3; // 場の傾向を取り込む度合い（0=全国一律, 1=場の実測のみ）
 
@@ -422,38 +429,42 @@ function predict(race, preview) {
     if (fastest) fastest.tags.unshift("展示タイム最速" + fastest.pv.racer_exhibition_time.toFixed(2));
   }
 
-  // 強度 = コース基礎1着率 × exp(BETA × 能力のレース内偏差)。
-  // コース基礎率は「全国平均」と「その競艇場の実測」をブレンドし、場の堅い/荒れ傾向を反映する。
+  // 着順別の強度。1着はコース基礎1着率（場ブレンド）、2着・3着は実測の着順別
+  // コース分布を土台にする。これで「外側が2-3着に来る」のを正しく評価できる。
   const vb = VENUE_BASE[race.race_stadium_number] || COURSE_BASE;
   const mean = items.reduce((s, x) => s + x.ability, 0) / n;
   const sd = Math.max(Math.sqrt(items.reduce((s, x) => s + (x.ability - mean) ** 2, 0) / n), 1);
   items.forEach((x) => {
     const z = (x.ability - mean) / sd;
-    const cb = VENUE_BLEND * (vb[x.course] || 0.02) + (1 - VENUE_BLEND) * (COURSE_BASE[x.course] || 0.02);
-    x.w = cb * Math.exp(BETA * z);
+    const cb1 = VENUE_BLEND * (vb[x.course] || 0.02) + (1 - VENUE_BLEND) * (COURSE_BASE[x.course] || 0.02);
+    x.w1 = cb1 * Math.exp(BETA * z);
+    x.w2 = (POS_BASE2[x.course] || 0.02) * Math.exp(BETA2 * z);
+    x.w3 = (POS_BASE3[x.course] || 0.02) * Math.exp(BETA3 * z);
   });
 
-  const W = items.reduce((s, x) => s + x.w, 0);
+  const S1 = items.reduce((s, x) => s + x.w1, 0);
+  const S2 = items.reduce((s, x) => s + x.w2, 0);
+  const S3 = items.reduce((s, x) => s + x.w3, 0);
 
   const p2 = Array(n).fill(0), p3 = Array(n).fill(0);
   const combos = [];
-  items.forEach((x, i) => { x.p1 = x.w / W * 100; });
+  items.forEach((x) => { x.p1 = x.w1 / S1 * 100; });
 
+  // 位置別プラケット・ルース（着順ごとに別の強度を使う閉形式）
   for (let i = 0; i < n; i++) {
-    const wi = items[i].w, W1 = W - wi;
+    const a = items[i];
     for (let j = 0; j < n; j++) {
       if (j === i) continue;
-      const wj = items[j].w, W2 = W1 - wj;
-      const pij = (wi / W) * (wj / W1);   // P(1着=i, 2着=j)
+      const b = items[j];
+      const pij = (a.w1 / S1) * (b.w2 / (S2 - a.w2)); // P(1着=i, 2着=j)
       p2[j] += pij;
       for (let k = 0; k < n; k++) {
         if (k === i || k === j) continue;
-        const pijk = pij * (items[k].w / W2); // P(1着=i,2着=j,3着=k)
+        const c = items[k];
+        const pijk = pij * (c.w3 / (S3 - a.w3 - b.w3)); // P(1着=i,2着=j,3着=k)
         p3[k] += pijk;
         combos.push({
-          key: items[i].b.racer_boat_number + "-" +
-               items[j].b.racer_boat_number + "-" +
-               items[k].b.racer_boat_number,
+          key: a.b.racer_boat_number + "-" + b.b.racer_boat_number + "-" + c.b.racer_boat_number,
           prob: pijk * 100,
         });
       }
@@ -510,11 +521,17 @@ function formationHitRate(combos, ranked, s1, s2, s3) {
 // 候補フォーメーションを総当たりで評価し、点数あたりの的中率が
 // 最も良い「効率フロンティア」を返す（=勝ちに最も近い買い目群）。
 function buildFormations(combos, ranked) {
+  // 着順別に候補を選ぶ：1着=勝率上位、2着=2着率上位、3着=3着率上位。
+  // 外側でも「3着に来やすい」艇を3着候補に入れられる。
+  const idx = ranked.map((_, i) => i);
+  const ord2 = [...idx].sort((a, b) => ranked[b].p2 - ranked[a].p2);
+  const ord3 = [...idx].sort((a, b) => ranked[b].p3 - ranked[a].p3);
   const cands = [];
   for (const n1 of [1, 2]) for (const n2 of [2, 3, 4]) for (const n3 of [3, 4, 5]) {
     if (n2 < n1 || n3 < n2) continue;
-    const s1 = seq(n1), s2 = seq(n2), s3 = seq(n3);
+    const s1 = seq(n1), s2 = ord2.slice(0, n2), s3 = ord3.slice(0, n3);
     const pts = countTrifecta(s1, s2, s3);
+    if (pts > 20) continue; // 点数を手頃な範囲に保つ
     const hit = formationHitRate(combos, ranked, s1, s2, s3);
     cands.push({ s1, s2, s3, pts, hit });
   }

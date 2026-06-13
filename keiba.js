@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v10（APIキーでClaude自動予想・無料は取込み）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v11（Claude予想を1セクションに統合）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -121,30 +121,27 @@ let claudeEditing = false;
 function curRaceId() { return lastRender && lastRender.race ? lastRender.race.race_id : ""; }
 
 // Claudeセクションの中身（保存済みの本物Claude予想があれば表示、無ければ取込みUI）
-function claudeBody() {
+// 「🧠 Claudeの予想」セクションの中身。APIキーがあれば本物のClaude(自動)を表示。
+function claudeMainBody() {
   const rid = curRaceId();
   const saved = rid ? getClaudeSaved(rid) : "";
-  if (saved && !claudeEditing) {
-    return '<div class="claude-real">🟣 <b>本物のClaudeの予想</b></div>' +
-      '<div class="claude-text">' + esc(saved).replace(/\n/g, "<br>") + "</div>" +
-      '<div class="claude-foot">' +
-      '<button id="askClaude" class="claude-btn small">🔄 Claudeで再予想</button>' +
-      '<button id="editClaude" class="claude-btn small ghost">✏️ 手動で編集</button>' +
-      "</div>";
-  }
+  if (saved && !claudeEditing) return realClaudeView(saved);
+  if (getClaudeKey() && !claudeEditing) return '<div class="spinner"></div>Claudeが予想中…（10〜40秒）';
+  // APIキー無し or 編集中 → アプリ内の総合分析＋（任意で）claude.ai手動取込み
   let h = "";
-  if (getClaudeKey()) {
-    // APIキーあり＝全自動
-    h += '<button id="askClaude" class="claude-btn big">🟣 Claudeに予想させる（自動）</button>';
-    h += '<span class="claude-hint">claude-opus-4-8 で自動生成（数円〜数十円/回・登録時の無料枠でも可）</span>';
-    h += '<details class="claude-manual"><summary>または手動で取り込む（claude.ai・無料）</summary>' + claudeManualUI() + "</details>";
-  } else {
-    h += '<div class="claude-steps">✅ <b>全自動にするには</b>：⚙️で Anthropic APIキーを設定（Maxプランは外部から自動呼び出し不可。' +
-      '<a class="claude-link" href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">キー取得 ↗</a>）。<br>' +
-      '無料で使うなら ↓ claude.ai(Maxプラン)の回答を取り込み：</div>';
-    h += claudeManualUI();
-  }
+  if (lastRender) h += aiAnalysisHTML(lastRender.race, lastRender.A);
+  h += '<details class="claude-manual"><summary>🟣 claude.ai（Maxプラン）の予想を手動で取り込む（無料）</summary>' +
+    '<div class="claude-steps">⚙️で Anthropic APIキーを入れると、ここに本物のClaude予想が自動表示されます（推奨）。</div>' +
+    claudeManualUI() + "</details>";
   return h;
+}
+function realClaudeView(saved) {
+  return '<div class="claude-real">🟣 <b>Claudeの予想</b>（claude-opus-4-8）</div>' +
+    '<div class="claude-text">' + esc(saved).replace(/\n/g, "<br>") + "</div>" +
+    '<div class="claude-foot">' +
+    '<button id="askClaude" class="claude-btn small">🔄 再予想</button>' +
+    '<button id="editClaude" class="claude-btn small ghost">✏️ 手動で編集</button>' +
+    "</div>";
 }
 // 手動取り込みUI（コピー → claude.ai → 貼り付け → 保存）
 function claudeManualUI() {
@@ -154,9 +151,9 @@ function claudeManualUI() {
     '<span id="claudeCopyMsg" class="claude-copied"></span>' +
     '<div id="claudePromptBox"></div>' +
     '<textarea id="claudePaste" class="claude-ta" rows="5" placeholder="claude.ai（Maxプラン）から返ってきたClaudeの予想をここに貼り付け"></textarea>' +
-    '<div class="claude-foot"><button id="saveClaude" class="claude-btn">本物のClaude予想として表示・保存</button></div>';
+    '<div class="claude-foot"><button id="saveClaude" class="claude-btn">この内容を表示・保存</button></div>';
 }
-function refreshClaudeOut() { const el = $("claudeOut"); if (el) el.innerHTML = claudeBody(); }
+function refreshClaudeOut() { const el = $("claudeOut"); if (el) el.innerHTML = claudeMainBody(); }
 
 // プロンプトをクリップボードへ（UIは保持。失敗時は手動コピー用に表示）
 async function copyClaudePrompt() {
@@ -202,7 +199,8 @@ async function runClaude() {
     refreshClaudeOut();
   } catch (e) {
     out.innerHTML = '<div class="status error">Claude(API)の取得に失敗：' + esc((e && e.message) || e) + "</div>" +
-      '<button id="editClaude" class="claude-btn small">戻る</button>';
+      '<button id="askClaude" class="claude-btn small">🔄 再試行</button>' +
+      (lastRender ? '<div class="ai-fallback">' + aiAnalysisHTML(lastRender.race, lastRender.A) + "</div>" : "");
   }
 }
 
@@ -789,16 +787,9 @@ function renderResult(race, A) {
   if (ctx.length) html += '<div class="cond">' + ctx.map((c) => "<span>" + c + "</span>").join("") + "</div>";
   html += "</div>";
 
-  // AI予想（総合分析）— アプリ内で自動生成
-  html += '<div class="claude-comment"><div class="cc-head">🧠 Claude(AI)の予想・総合分析</div>' +
-    '<div class="cc-body">' + aiAnalysisHTML(race, A) + "</div></div>";
-
-  // 本物のClaudeの予想（claude.ai/Maxプラン）を取り込んで表示・保存（API不要）
-  html += '<div class="section-label">🟣 本物のClaudeの予想（claude.ai / Maxプラン）</div>';
-  html += '<div class="bet-box claude-box"><div id="claudeOut" class="claude-out">' + claudeBody() + "</div>";
-  html += '<p class="claude-hint">Maxプランは外部アプリから自動呼び出しできないため、claude.ai の回答をここに取り込みます（無料）。' +
-    '取り込んだ予想はレースごとに保存され、次に同じレースを開くと再表示されます。⚙️にAPIキーを入れた場合のみ自動取得も可能（有料）。</p>';
-  html += "</div>";
+  // Claudeの予想（APIキーがあれば本物のClaudeを自動表示／無ければアプリ内分析）
+  html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
+    '<div class="cc-body"><div id="claudeOut" class="claude-out">' + claudeMainBody() + "</div></div></div>";
 
   // 3連複 的中率重視プラン（メイン）
   html += '<div class="section-label">🎯 3連複 的中率重視プラン（複数の買い方）</div>';

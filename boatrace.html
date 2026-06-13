@@ -298,8 +298,8 @@ select:disabled { opacity: .55; }
     <details class="settings">
       <summary>⚙️ 直前情報サーバー設定（任意）</summary>
       <input id="proxyUrl" type="url" inputmode="url" autocapitalize="off" autocomplete="off"
-             placeholder="https://xxxxx.workers.dev" />
-      <p class="hint">Cloudflare Workers のURLを貼り付けると、締切前の<b>展示タイム等を公式から自動取得</b>します（保存されます）。未設定でも出走表ベースの予想は使えます。設定方法は worker/README.md を参照。</p>
+             placeholder="https://script.google.com/macros/s/.../exec" />
+      <p class="hint">Google Apps Script の公開URL（/exec）を貼り付けると、締切前の<b>展示タイム等を公式から自動取得</b>します（保存されます）。未設定でも出走表ベースの予想は使えます。設定方法は worker/GAS-README.md を参照。</p>
     </details>
   </section>
 
@@ -327,7 +327,7 @@ const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 直前情報サーバー(Cloudflare)対応 (v10)";
+const APP_VERSION = "2026-06-13 GAS(JSONP)対応 (v11)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -388,7 +388,7 @@ const preKey = (stadium, raceNo) => stadium + "-" + raceNo;
 
 /* ------------------- 直前情報サーバー（プロキシ）設定 ------------------- */
 // ↓ デプロイした Cloudflare Worker のURLをここに焼き込むと、スマホでも設定なしで動く
-const DEFAULT_PROXY_URL = "https://boatrace.komemonoei.workers.dev/";
+const DEFAULT_PROXY_URL = "";
 const PROXY_KEY = "boatrace_proxy_url";
 let proxyUrlMem = "";
 
@@ -438,17 +438,53 @@ function proxyToPreview(d, stadium, raceNo) {
   };
 }
 
+// GAS(script.google.com)は通常のfetchがCORSで弾かれるため JSONP で取得する
+function isGasUrl(u) { return /script\.google\.com|googleusercontent\.com/.test(u); }
+
+// JSONP取得：<script>タグで読み込み、コールバックでデータを受け取る（CORS非対象）
+function fetchJsonp(baseUrl, params, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const cb = "__brcb" + Math.random().toString(36).slice(2);
+    const usp = new URLSearchParams(params);
+    usp.set("callback", cb);
+    const sep = baseUrl.includes("?") ? "&" : "?";
+    const s = document.createElement("script");
+    let done = false;
+    const timer = setTimeout(() => finish(() => reject(new Error("JSONP timeout"))), timeoutMs || 15000);
+    function finish(fn) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { delete window[cb]; } catch { window[cb] = undefined; }
+      if (s.parentNode) s.parentNode.removeChild(s);
+      fn();
+    }
+    window[cb] = (data) => finish(() => resolve(data));
+    s.onerror = () => finish(() => reject(new Error("JSONP load error")));
+    s.src = baseUrl + sep + usp.toString();
+    document.head.appendChild(s);
+  });
+}
+
 // プロキシから締切前の直前情報を取得（未設定/失敗時は null）
 async function fetchLivePreview(race) {
   const proxy = getProxyUrl();
   if (!proxy) return null;
-  const hd = (race.race_date || "").replace(/-/g, "");
-  const jcd = String(race.race_stadium_number).padStart(2, "0");
-  const sep = proxy.includes("?") ? "&" : "?";
-  const u = proxy + sep + "jcd=" + jcd + "&rno=" + race.race_number + "&hd=" + hd + "&_=" + Date.now();
-  const res = await fetch(u, { cache: "no-store" });
-  if (!res.ok) throw new Error("proxy HTTP " + res.status);
-  const d = await res.json();
+  const params = {
+    jcd: String(race.race_stadium_number).padStart(2, "0"),
+    rno: race.race_number,
+    hd: (race.race_date || "").replace(/-/g, ""),
+    _: Date.now(),
+  };
+  let d;
+  if (isGasUrl(proxy)) {
+    d = await fetchJsonp(proxy, params);          // GAS は JSONP
+  } else {
+    const sep = proxy.includes("?") ? "&" : "?";  // それ以外（Cloudflare等）は通常fetch
+    const res = await fetch(proxy + sep + new URLSearchParams(params).toString(), { cache: "no-store" });
+    if (!res.ok) throw new Error("proxy HTTP " + res.status);
+    d = await res.json();
+  }
   return proxyToPreview(d, race.race_stadium_number, race.race_number);
 }
 

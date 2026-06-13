@@ -1,5 +1,6 @@
 // ボートレース直前情報プロキシ（Google Apps Script 版・貼り付け事故対策版）
 // 使い方:  <公開URL>?jcd=20&rno=6&hd=20260613
+//   JSONPで使う場合:  ...&callback=関数名   （ブラウザからの呼び出しはこちら）
 // 手順は GAS-README.md を参照。
 
 function doGet(e) {
@@ -35,7 +36,15 @@ function doGet(e) {
       out = { error: String(err) };
     }
   }
-  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+
+  var text = JSON.stringify(out);
+  // JSONP: callback 指定時は JavaScript として返す（ブラウザのCORS制約を回避）
+  var cb = String(p.callback || "");
+  if (cb && /^[A-Za-z0-9_$.]+$/.test(cb)) {
+    return ContentService.createTextOutput(cb + "(" + text + ");")
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(text).setMimeType(ContentService.MimeType.JSON);
 }
 
 function todayJST_() {

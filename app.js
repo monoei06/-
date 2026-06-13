@@ -11,7 +11,7 @@ const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 APIのみ自動取得版 (v9)";
+const APP_VERSION = "2026-06-13 直前情報サーバー対応 (v8)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -69,6 +69,59 @@ let byStadium = new Map();  // stadium番号 -> [race,...]
 let PREVIEWS = new Map();   // "stadium-race" -> 直前情報
 
 const preKey = (stadium, raceNo) => stadium + "-" + raceNo;
+
+/* ------------------- 直前情報サーバー（プロキシ）設定 ------------------- */
+const PROXY_KEY = "boatrace_proxy_url";
+let proxyUrlMem = "";
+function getProxyUrl() {
+  try { return (localStorage.getItem(PROXY_KEY) || proxyUrlMem || "").trim(); }
+  catch { return proxyUrlMem.trim(); }
+}
+function setProxyUrl(v) {
+  proxyUrlMem = v || "";
+  try { localStorage.setItem(PROXY_KEY, proxyUrlMem); } catch { /* file:// 等で不可でもメモリ保持 */ }
+}
+
+// プロキシJSON → アプリ内 preview 形式へ変換
+function proxyToPreview(d, stadium, raceNo) {
+  if (!d || !d.exhibition || !d.boats) return null;
+  const boats = {};
+  for (const k of Object.keys(d.boats)) {
+    const b = d.boats[k];
+    boats[String(b.boat || k)] = {
+      racer_boat_number: b.boat || Number(k),
+      racer_course_number: b.course,
+      racer_exhibition_time: b.exhibition_time,
+      racer_start_timing: b.start_timing,
+      racer_tilt_adjustment: b.tilt,
+      racer_weight: b.weight,
+    };
+  }
+  const W = d.weather || {};
+  const wmap = { "晴": 1, "曇り": 2, "曇": 2, "雨": 3, "雪": 4, "霧": 5 };
+  return {
+    race_stadium_number: stadium, race_number: raceNo, boats,
+    race_wind: W.wind_speed != null ? Number(W.wind_speed) : null,
+    race_wave: W.wave_height != null ? Number(W.wave_height) : null,
+    race_temperature: W.air_temperature != null ? Number(W.air_temperature) : null,
+    race_water_temperature: W.water_temperature != null ? Number(W.water_temperature) : null,
+    race_weather_number: wmap[(W.weather_text || "").trim()] || null,
+  };
+}
+
+// プロキシから締切前の直前情報を取得（未設定/失敗時は null）
+async function fetchLivePreview(race) {
+  const proxy = getProxyUrl();
+  if (!proxy) return null;
+  const hd = (race.race_date || "").replace(/-/g, "");
+  const jcd = String(race.race_stadium_number).padStart(2, "0");
+  const sep = proxy.includes("?") ? "&" : "?";
+  const u = proxy + sep + "jcd=" + jcd + "&rno=" + race.race_number + "&hd=" + hd + "&_=" + Date.now();
+  const res = await fetch(u, { cache: "no-store" });
+  if (!res.ok) throw new Error("proxy HTTP " + res.status);
+  const d = await res.json();
+  return proxyToPreview(d, race.race_stadium_number, race.race_number);
+}
 
 /* ----------------------------- データ取得 ------------------------------ */
 async function loadData() {
@@ -414,9 +467,14 @@ function renderResult(race, pred) {
   html += "</div>";
 
   // 展示前のお知らせ
-  if (!hasExhibition)
-    html += '<div class="pre-note">⏳ このレースはまだ展示（直前情報）がデータ元APIに反映されていません。' +
-            '公式発表からAPI反映まで数分〜十数分のラグがあります。発走が近づいたら 🔄 で再取得してください。</div>';
+  if (!hasExhibition) {
+    const hasProxy = getProxyUrl();
+    html += '<div class="pre-note">⏳ このレースはまだ展示（直前情報）が反映されていません。' +
+      (hasProxy
+        ? "公式にまだ展示が出ていないか、取得に失敗した可能性があります。発走が近づいたら再度「予想する」を押してください。"
+        : "⚙️直前情報サーバーを設定すると、締切前でも公式サイトから展示を自動取得できます（worker/README.md 参照）。") +
+      "</div>";
+  }
 
   // Claudeの総評
   html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
@@ -560,16 +618,31 @@ let currentRaceKey = null; // 表示中レース（更新時の再描画用）
 
 venueSel.addEventListener("change", populateRaces);
 
-function runPrediction() {
+async function runPrediction() {
   const list = byStadium.get(Number(venueSel.value)) || [];
   const race = list.find((r) => r.race_number === Number(raceSel.value));
   if (!race) return;
   currentRaceKey = preKey(race.race_stadium_number, race.race_number);
-  const preview = PREVIEWS.get(currentRaceKey);
+  let preview = PREVIEWS.get(currentRaceKey); // オープンAPI（フォールバック）
+
+  // 直前情報サーバーが設定されていれば、締切前の展示を公式から取得
+  if (getProxyUrl()) {
+    const prevStatus = statusEl.innerHTML;
+    setStatus('<div class="spinner"></div>直前情報サーバーから展示データを取得中…');
+    try {
+      const live = await fetchLivePreview(race);
+      if (live && live.boats) preview = live;
+    } catch (e) {
+      setStatus("⚠️ 直前情報サーバーに接続できませんでした（出走表ベースで予想します）。<br><small>" + e.message + "</small>", true);
+      setTimeout(() => { if (statusEl.textContent.includes("直前情報サーバーに接続")) setStatus(""); }, 4000);
+    }
+    if (statusEl.querySelector(".spinner")) setStatus("");
+  }
+
   renderResult(race, predict(race, preview));
 }
 
-predictBtn.addEventListener("click", runPrediction);
+predictBtn.addEventListener("click", () => { runPrediction(); });
 
 // 🔄 データ再取得 → 表示中レースを最新データで再描画
 const refreshBtn = $("refresh");
@@ -582,6 +655,14 @@ if (refreshBtn) refreshBtn.addEventListener("click", () => {
     refreshBtn.disabled = false;
   });
 });
+
+// 直前情報サーバーURL入力（localStorage に保存）
+const proxyInput = $("proxyUrl");
+if (proxyInput) {
+  proxyInput.value = getProxyUrl();
+  proxyInput.addEventListener("change", () => setProxyUrl(proxyInput.value));
+  proxyInput.addEventListener("blur", () => setProxyUrl(proxyInput.value));
+}
 
 // バージョン表示
 const verEl = $("version");

@@ -140,6 +140,8 @@ input[type="date"] {
 .bet-umaren { border-left: 4px solid #3a7bd5; }
 .bet-fuku3 { border-left: 4px solid #8e44ad; }
 .bet-tan3 { border-left: 4px solid var(--accent); }
+.bet-box.recommended { border: 2px solid var(--good); box-shadow: 0 2px 12px rgba(27,138,58,.18); }
+.rec-tag { font-size: .68rem; font-weight: 800; color: #fff; background: var(--good); border-radius: 5px; padding: 1px 7px; margin-left: 6px; }
 .bet-note { font-size: .72rem; color: var(--muted); margin-top: 8px; }
 
 /* チップ（馬番） */

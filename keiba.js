@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v1";
+const APP_VERSION = "2026-06-13 競馬AI予想 v2（日付選択対応）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -21,6 +21,7 @@ const PROXY_KEY = "keiba_proxy_url";
 const BETA = 1.15;
 
 const $ = (id) => document.getElementById(id);
+const dateSel = $("datePick");
 const venueSel = $("venue");
 const raceSel = $("race");
 const predictBtn = $("predict");
@@ -61,15 +62,16 @@ async function loadData() {
       "Cloudflare Workers に <code>keiba-proxy.js</code> を1度だけデプロイし、URL を⚙️に貼り付けます。", true);
     return;
   }
-  setStatus('<div class="spinner"></div>本日の開催・レースを取得中…');
+  const date = selectedDate();
+  setStatus('<div class="spinner"></div>' + fmtDate(date) + ' の開催・レースを取得中…');
   try {
-    const res = await fetch(proxyGet("date="), { cache: "no-store" });
+    const res = await fetch(proxyGet("date=" + date), { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const j = await res.json();
     if (j.error) throw new Error(j.error);
     MEETINGS = Array.isArray(j.meetings) ? j.meetings : [];
     if (!MEETINGS.length) {
-      setStatus("本日(" + (j.date || "") + ")は中央競馬の開催が見つかりませんでした。", true);
+      setStatus(fmtDate(j.date) + " は中央競馬の開催が見つかりませんでした。日付を変えてお試しください。", true);
       return;
     }
     RACE_CACHE = new Map();
@@ -532,6 +534,18 @@ function raceComment(ranked, depth, A) {
 
 /* ----------------------------- ユーティリティ ------------------------------ */
 function fmt(v) { return v == null ? "-" : (Math.round(v * 10) / 10); }
+// 日本時間で offsetDays 日後の YYYY-MM-DD
+function ymdJST(offsetDays) {
+  const d = new Date(Date.now() + 9 * 3600 * 1000 + (offsetDays || 0) * 86400000);
+  return d.getUTCFullYear() + "-" +
+    String(d.getUTCMonth() + 1).padStart(2, "0") + "-" +
+    String(d.getUTCDate()).padStart(2, "0");
+}
+// 選択中の日付を YYYYMMDD で返す（未選択なら本日）
+function selectedDate() {
+  const v = dateSel && dateSel.value ? dateSel.value : ymdJST(0);
+  return v.replace(/-/g, "");
+}
 function fmtDate(d) {
   if (!d || d.length !== 8) return d || "";
   return d.slice(0, 4) + "/" + d.slice(4, 6) + "/" + d.slice(6, 8);
@@ -601,6 +615,19 @@ if (proxyInput) {
   const save = () => { setProxyUrl(proxyInput.value); if (getProxyUrl() && !MEETINGS.length) loadData(); };
   proxyInput.addEventListener("change", save);
   proxyInput.addEventListener("blur", save);
+}
+
+// 日付選択（既定=本日JST。前後の日付も選べる）
+if (dateSel) {
+  if (!dateSel.value) dateSel.value = ymdJST(0);
+  dateSel.min = ymdJST(-7);
+  dateSel.max = ymdJST(8);
+  dateSel.addEventListener("change", () => {
+    resultEl.hidden = true;
+    raceSel.innerHTML = "";
+    venueSel.innerHTML = "";
+    loadData();
+  });
 }
 
 const verEl = $("version");

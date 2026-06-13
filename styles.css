@@ -183,6 +183,27 @@ select:disabled { opacity: .55; }
 }
 .fm-summary { margin-top: 10px; font-size: .9rem; font-weight: 700; color: var(--text); }
 .fm-summary b { color: var(--accent); font-size: 1.1rem; }
+.fm-summary b.hit { color: #16a34a; font-size: 1.2rem; }
+
+/* シミュレーションタグ */
+.sim-tag {
+  display: inline-block; margin-top: 8px; font-size: .72rem; font-weight: 700;
+  color: #fff; background: #7c3aed; padding: 3px 10px; border-radius: 999px;
+}
+
+/* 3連単 出現ランキング */
+.combo-row { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.combo-row:last-of-type { border-bottom: none; }
+.combo-rank { width: 20px; font-weight: 800; color: var(--muted); font-size: .85rem; text-align: center; }
+.combo-arrow { color: var(--muted); font-size: .8rem; }
+.combo-prob { margin-left: auto; font-weight: 800; color: var(--navy); font-size: .95rem; }
+
+/* おすすめフォーメーション強調 */
+.bet-box.recommended { border: 2px solid #16a34a; box-shadow: 0 2px 12px rgba(22,163,74,.18); }
+.rec-tag {
+  font-size: .68rem; font-weight: 800; color: #fff; background: #16a34a;
+  padding: 2px 8px; border-radius: 999px; margin-left: 4px; vertical-align: middle;
+}
 
 .app-footer { max-width: 640px; margin: 0 auto; padding: 8px 16px 32px; text-align: center; color: var(--muted); }
 .app-footer a { color: var(--navy); }

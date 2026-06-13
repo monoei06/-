@@ -308,7 +308,7 @@ input[type="date"] {
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v12（Claudeが3連複の買い目を提示）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v13（Claudeが3連複買い目をカード表示）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -383,6 +383,62 @@ async function callClaude(prompt) {
   return (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
 
+// 3連複の買い目を構造化出力(JSON)で受け取るスキーマ
+const CLAUDE_BET_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    honmei: {
+      type: "object", additionalProperties: false,
+      properties: {
+        axis: { type: "array", items: { type: "integer" } },
+        partners: { type: "array", items: { type: "integer" } },
+      },
+      required: ["axis", "partners"],
+    },
+    osae: {
+      type: "object", additionalProperties: false,
+      properties: {
+        axis: { type: "array", items: { type: "integer" } },
+        partners: { type: "array", items: { type: "integer" } },
+      },
+      required: ["axis", "partners"],
+    },
+    comment: { type: "string" },
+  },
+  required: ["honmei", "osae", "comment"],
+};
+
+// Claude APIを構造化出力で呼び、JSON文字列を返す
+async function callClaudeJSON(prompt, schema) {
+  const key = getClaudeKey();
+  if (!key) throw new Error("Anthropic APIキーが未設定です（⚙️で設定）");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1500,
+      system: CLAUDE_SYSTEM,
+      messages: [{ role: "user", content: prompt }],
+      output_config: { format: { type: "json_schema", schema } },
+    }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.text()).slice(0, 200); } catch { /* noop */ }
+    throw new Error("HTTP " + res.status + (detail ? " " + detail : ""));
+  }
+  const j = await res.json();
+  if (j.stop_reason === "refusal") throw new Error("安全上の理由で回答が見送られました");
+  return (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+}
+
 // 予想結果(A)からClaudeへのプロンプトを組み立てる
 function buildClaudePrompt(race, A) {
   const R = A.items;
@@ -405,14 +461,12 @@ function buildClaudePrompt(race, A) {
     "【出走馬（AI勝率＝市場オッズ由来の順）】\n" + lines + "\n" +
     "（複勝率は" + depth + "着内率。近走指数は基準タイム比の参考値・馬場/クラス未補正）\n\n" +
     "【3連複プラン候補（モデル算出の的中率）】\n" + plans + "\n\n" +
-    "この情報をもとに、AI視点で『3連複の買い目』を馬番で具体的に提案してください。次のフォーマットで：\n" +
-    "①構図：展開・人気の信頼度・波乱度を1〜2行で\n" +
-    "②軸：◯番（1〜2頭。理由を一言。なぜその馬か）\n" +
-    "③相手：◯,◯,◯…（馬番を列挙。妙味の人気薄がいれば理由つきで含める）\n" +
-    "④本線の買い目：『3連複 軸◯ − 相手◯,◯,◯,◯（合計◯点）』のように馬番と点数を明記\n" +
-    "⑤抑えの買い目：手広め or 穴狙いをもう1案（馬番・点数つき）\n" +
-    "⑥リスク：外れ筋を一言\n" +
-    "合計点数は目安20点以内。的中率と配当のバランスを意識し、市場が最良予測である点を踏まえて過信しないこと。";
+    "この情報をもとに、勝ちにいく『3連複の買い目』を2案、馬番で選んでください（出力はJSON）。\n" +
+    "・honmei＝本線：的中率を重視した堅めの買い目。軸(axis)1〜2頭＋相手(partners)で構成（合計おおむね10点以内が目安）。\n" +
+    "・osae＝抑え：少し手広く or 妙味の人気薄を絡めた買い目（合計おおむね20点以内）。\n" +
+    "・axis/partners は馬番(整数)の配列。BOXで買う場合は axis を空配列[]にし、partners に対象馬を全部入れる。\n" +
+    "・comment＝なぜその軸・相手なのか、展開やリスクを2〜4行で簡潔に（日本語）。\n" +
+    "市場(オッズ)が最良予測である点を踏まえ、軸は上位人気から大きく外しすぎないこと。必勝ではない。";
 }
 
 // 本物のClaude予想をレース別にブラウザ保存（無料・claude.aiの回答を取り込む）
@@ -438,12 +492,74 @@ function claudeMainBody() {
   return h;
 }
 function realClaudeView(saved) {
-  return '<div class="claude-real">🟣 <b>Claudeの予想</b>（claude-opus-4-8）</div>' +
+  // API(JSON)で保存された買い目ならカード表示、そうでなければ（手動取込み等）テキスト表示
+  let obj = null;
+  try { const o = JSON.parse(saved); if (o && (o.honmei || o.osae)) obj = o; } catch { obj = null; }
+  if (obj && lastRender) return renderClaudeBets(obj, lastRender.A);
+  return '<div class="claude-real">🟣 <b>Claudeの予想</b></div>' +
     '<div class="claude-text">' + esc(saved).replace(/\n/g, "<br>") + "</div>" +
     '<div class="claude-foot">' +
     '<button id="askClaude" class="claude-btn small">🔄 再予想</button>' +
     '<button id="editClaude" class="claude-btn small ghost">✏️ 手動で編集</button>' +
     "</div>";
+}
+
+// Claudeが選んだ買い目（軸/相手）→ アプリの的中率・点数・期待値つきカードに描画
+function claudeTriosFor(axis, partners) {
+  const pool = [], seen = {};
+  for (const n of axis.concat(partners)) { if (!seen[n]) { seen[n] = 1; pool.push(n); } }
+  const need = axis.slice();
+  const res = [];
+  for (let i = 0; i < pool.length; i++) for (let j = i + 1; j < pool.length; j++) for (let k = j + 1; k < pool.length; k++) {
+    const t = [pool[i], pool[j], pool[k]];
+    let ok = true;
+    for (const a of need) if (t.indexOf(a) < 0) { ok = false; break; }
+    if (ok) res.push(t);
+  }
+  return res;
+}
+function claudePlanCard(label, axis, partners, A) {
+  const trios = claudeTriosFor(axis, partners);
+  if (!trios.length) return "";
+  let hit = 0; const evc = [];
+  for (const t of trios) {
+    const pr = A.trio[trioKey(t[0], t[1], t[2])] || 0;
+    hit += pr;
+    evc.push({ prob: pr, odds: poolOdds(A.pools && A.pools.trio, tKey(t[0], t[1], t[2])) });
+  }
+  const ev = evRatio(evc);
+  const chip = (n) => {
+    const it = A.items.find((x) => x.idxNum === n);
+    const rk = it ? A.items.indexOf(it) : -1;
+    return chipHTML({ num: n, mark: rk >= 0 ? (MARKS[rk] || "") : "", name: it ? it.h.name : "" });
+  };
+  let h = '<div class="bet-box bet-fuku3"><div class="bet-type">' + esc(label) +
+    '<span class="bet-hit">的中率 <b>' + (hit * 100).toFixed(1) + "%</b></span></div>";
+  h += '<div class="fm">';
+  if (axis.length) h += '<div class="fm-row"><span class="fm-pos">軸</span><span class="fm-chips">' + axis.map(chip).join("") + "</span></div>";
+  h += '<div class="fm-row"><span class="fm-pos">' + (axis.length ? "相手" : "BOX") + '</span><span class="fm-chips">' + partners.map(chip).join("") + "</span></div>";
+  h += "</div>";
+  h += '<div class="bet-summary">' + trios.length + "点 = <b>" + (trios.length * 100).toLocaleString() + "円</b>（100円/点）";
+  if (ev != null && isFinite(ev)) {
+    const roi = (ev - 1) * 100;
+    h += ' ／ 期待値 <b class="' + (ev >= 1 ? "ev" : "") + '">' + ev.toFixed(2) + "</b>" +
+      '<span class="roi ' + (roi >= 0 ? "pos" : "neg") + '">ROI ' + (roi >= 0 ? "+" : "") + roi.toFixed(0) + "%</span>";
+  }
+  h += "</div></div>";
+  return h;
+}
+function renderClaudeBets(obj, A) {
+  const valid = {};
+  A.items.forEach((x) => { valid[x.idxNum] = 1; });
+  const clean = (arr) => (Array.isArray(arr) ? arr.map(Number).filter((n) => valid[n]) : []);
+  let h = '<div class="claude-real">🟣 <b>Claudeの勝てる馬券（3連複）</b>（claude-opus-4-8）</div>';
+  h += '<div class="bets">';
+  if (obj.honmei) h += claudePlanCard("本線（堅め）", clean(obj.honmei.axis), clean(obj.honmei.partners), A);
+  if (obj.osae) h += claudePlanCard("抑え（手広め/穴）", clean(obj.osae.axis), clean(obj.osae.partners), A);
+  h += "</div>";
+  if (obj.comment) h += '<div class="claude-text">💬 ' + esc(obj.comment).replace(/\n/g, "<br>") + "</div>";
+  h += '<div class="claude-foot"><button id="askClaude" class="claude-btn small">🔄 再予想</button></div>';
+  return h;
 }
 // 手動取り込みUI（コピー → claude.ai → 貼り付け → 保存）
 function claudeManualUI() {
@@ -492,9 +608,9 @@ function editClaudeReply() { claudeEditing = true; refreshClaudeOut(); }
 async function runClaude() {
   const out = $("claudeOut");
   if (!out || !lastRender) return;
-  out.innerHTML = '<div class="spinner"></div>Claude(API)が分析中…（10〜40秒）';
+  out.innerHTML = '<div class="spinner"></div>Claudeが勝てる馬券を予想中…（10〜40秒）';
   try {
-    const txt = await callClaude(buildClaudePrompt(lastRender.race, lastRender.A));
+    const txt = await callClaudeJSON(buildClaudePrompt(lastRender.race, lastRender.A), CLAUDE_BET_SCHEMA);
     const rid = curRaceId();
     if (rid) setClaudeSaved(rid, txt);
     claudeEditing = false;

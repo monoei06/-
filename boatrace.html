@@ -225,6 +225,11 @@ select:disabled { opacity: .55; }
   font-size: .76rem; color: var(--text); font-weight: 600;
 }
 .cond span { background: var(--bg); padding: 2px 8px; border-radius: 6px; }
+.pre-note {
+  background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 12px;
+  font-size: .78rem; line-height: 1.6;
+}
 .boat-detail .pre b { color: #7c3aed; }
 .boat-detail .pre { color: #6b21a8; }
 
@@ -308,7 +313,7 @@ const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
 const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 展示前/展示済 判定対応 (v6)";
+const APP_VERSION = "2026-06-13 更新ボタン再描画+キャッシュ回避 (v7)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -371,10 +376,11 @@ const preKey = (stadium, raceNo) => stadium + "-" + raceNo;
 async function loadData() {
   setStatus('<div class="spinner"></div>本日の出走表・直前情報を取得中…');
   try {
-    // 出走表（必須）と直前情報（任意）を並行取得
+    // 出走表（必須）と直前情報（任意）を並行取得。?_= でキャッシュ回避し常に最新を取る
+    const bust = "?_=" + Date.now();
     const [progRes, prevRes] = await Promise.all([
-      fetch(PROGRAMS_URL, { cache: "no-store" }),
-      fetch(PREVIEWS_URL, { cache: "no-store" }).catch(() => null),
+      fetch(PROGRAMS_URL + bust, { cache: "no-store" }),
+      fetch(PREVIEWS_URL + bust, { cache: "no-store" }).catch(() => null),
     ]);
     if (!progRes.ok) throw new Error("HTTP " + progRes.status);
     const json = await progRes.json();
@@ -709,6 +715,11 @@ function renderResult(race, pred) {
   }
   html += "</div>";
 
+  // 展示前のお知らせ
+  if (!hasExhibition)
+    html += '<div class="pre-note">⏳ このレースはまだ展示（直前情報）がデータ元APIに反映されていません。' +
+            '公式発表からAPI反映まで数分〜十数分のラグがあります。発走が近づいたら 🔄 で再取得してください。</div>';
+
   // Claudeの総評
   html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
           '<div class="cc-body">' + esc(comment) + "</div></div>";
@@ -847,21 +858,30 @@ function setStatus(html, isError) {
 }
 
 /* ----------------------------- イベント --------------------------------- */
+let currentRaceKey = null; // 表示中レース（更新時の再描画用）
+
 venueSel.addEventListener("change", populateRaces);
-predictBtn.addEventListener("click", () => {
+
+function runPrediction() {
   const list = byStadium.get(Number(venueSel.value)) || [];
   const race = list.find((r) => r.race_number === Number(raceSel.value));
   if (!race) return;
-  const preview = PREVIEWS.get(preKey(race.race_stadium_number, race.race_number));
+  currentRaceKey = preKey(race.race_stadium_number, race.race_number);
+  const preview = PREVIEWS.get(currentRaceKey);
   renderResult(race, predict(race, preview));
-});
+}
 
-// 🔄 データ再取得（締切直前の展示情報を取り込み直す）
+predictBtn.addEventListener("click", runPrediction);
+
+// 🔄 データ再取得 → 表示中レースを最新データで再描画
 const refreshBtn = $("refresh");
 if (refreshBtn) refreshBtn.addEventListener("click", () => {
   const v = venueSel.value, r = raceSel.value;
+  refreshBtn.disabled = true;
   loadData().then(() => {
     if (v) { venueSel.value = v; populateRaces(); if (r) raceSel.value = r; }
+    if (!resultEl.hidden && raceSel.value) runPrediction(); // 結果表示中なら最新で更新
+    refreshBtn.disabled = false;
   });
 });
 

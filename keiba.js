@@ -8,20 +8,25 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v3（複勝補正・実オッズEV・妙味・信頼度）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v4（本命バイアス除去・スタンス選択）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
 const PROXY_KEY = "keiba_proxy_url";
 
-// 本命-大穴バイアス補正の指数（favorite-longshot bias）。
-// 競馬では「本命はオッズが示すより実際に多く勝ち、大穴は過剰人気で負けやすい」ことが
-// 長年実証されている。市場勝率 p を p^BETA に補正（BETA>1 で本命を引き上げる）。
-// 頭数が多い・荒れやすいレースほどバイアスが強いとされるため、頭数で自動調整する。
-function adaptiveBeta(n) { return clamp(1.08 + 0.012 * (n - 8), 1.08, 1.22); }
+// 予想スタンス → 確率の鋭さ指数 BETA（市場勝率 p を p^BETA に補正して正規化）。
+// バックテスト（81R）では市場どおり(=1.0)が最も的中率が高く、過去指数の上乗せは精度を
+// 下げたため、既定は 1.0（市場どおり）。スタンスで本命寄り/穴寄りを選べる。
+//  標準 std=1.00（市場どおり・最も的中重視）
+//  堅実 kata=1.10（本命をより厚く＝さらに堅実）
+//  穴   ana=0.90（本命依存を弱め広く＝妙味重視・的中率は下がる）
+function stanceBeta() {
+  return ({ std: 1.00, kata: 1.10, ana: 0.90 })[(stanceSel && stanceSel.value) || "std"] || 1.00;
+}
 
 const $ = (id) => document.getElementById(id);
 const dateSel = $("datePick");
+const stanceSel = $("stance");
 const venueSel = $("venue");
 const raceSel = $("race");
 const predictBtn = $("predict");
@@ -147,7 +152,7 @@ function popFallback(horses) {
 function analyze(horses, pools) {
   const mk = marketProbs(horses);
   const n = mk.items.length;
-  const beta = adaptiveBeta(n);
+  const beta = stanceBeta();
   const items = mk.items.map((x) => ({
     h: x.h, mp: x.p, w: Math.pow(Math.max(x.p, 1e-9), beta),
   }));
@@ -766,6 +771,11 @@ if (dateSel) {
     loadData();
   });
 }
+
+// スタンス変更 → 表示中レースを即再計算
+if (stanceSel) stanceSel.addEventListener("change", () => {
+  if (!resultEl.hidden && raceSel.value) runPrediction();
+});
 
 const verEl = $("version");
 if (verEl) verEl.textContent = "ビルド: " + APP_VERSION;

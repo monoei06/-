@@ -158,6 +158,8 @@ input[type="date"] {
 .claude-ta { width: 100%; font-size: .78rem; font-family: inherit; line-height: 1.5; padding: 10px; border: 2px solid #d9c2e6; border-radius: 9px; background: #fcfaff; color: var(--text); resize: vertical; }
 .claude-foot { width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .claude-text { width: 100%; font-size: .9rem; line-height: 1.7; }
+.claude-real { width: 100%; font-size: .85rem; color: #8e44ad; font-weight: 700; }
+.claude-steps { width: 100%; font-size: .82rem; line-height: 2; }
 .bet-note { font-size: .72rem; color: var(--muted); margin-top: 8px; }
 
 /* チップ（馬番） */

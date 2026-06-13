@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v8（AI総合分析を本文表示・3連複）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v9（本物のClaude予想を取込み表示・3連複）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -113,39 +113,87 @@ function buildClaudePrompt(race, A) {
     "市場が最良の予測である点を踏まえ、過信せず簡潔に。";
 }
 
-// claude.ai(Maxプラン等)に貼り付けるプロンプトを生成してクリップボードへ。API不要・無料。
+// 本物のClaude予想をレース別にブラウザ保存（無料・claude.aiの回答を取り込む）
+function claudeSavedKey(raceId) { return "keiba_claude_" + raceId; }
+function getClaudeSaved(raceId) { try { return localStorage.getItem(claudeSavedKey(raceId)) || ""; } catch { return ""; } }
+function setClaudeSaved(raceId, txt) { try { localStorage.setItem(claudeSavedKey(raceId), txt); } catch { /* file:// */ } }
+let claudeEditing = false;
+function curRaceId() { return lastRender && lastRender.race ? lastRender.race.race_id : ""; }
+
+// Claudeセクションの中身（保存済みの本物Claude予想があれば表示、無ければ取込みUI）
+function claudeBody() {
+  const rid = curRaceId();
+  const saved = rid ? getClaudeSaved(rid) : "";
+  if (saved && !claudeEditing) {
+    return '<div class="claude-real">🟣 <b>本物のClaudeの予想</b>（claude.aiの回答）</div>' +
+      '<div class="claude-text">' + esc(saved).replace(/\n/g, "<br>") + "</div>" +
+      '<div class="claude-foot">' +
+      '<button id="editClaude" class="claude-btn small ghost">✏️ 編集／別の回答に更新</button>' +
+      '<button id="copyClaude" class="claude-btn small">📋 プロンプト再コピー</button>' +
+      '<a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai ↗</a>' +
+      "</div>";
+  }
+  let h = '<div class="claude-steps">';
+  h += '① <button id="copyClaude" class="claude-btn small">📋 プロンプトをコピー</button>';
+  h += ' ② <a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai に貼り付け ↗</a>';
+  h += " ③ 返ってきた予想を下に貼って保存";
+  h += "</div>";
+  h += '<span id="claudeCopyMsg" class="claude-copied"></span>';
+  h += '<div id="claudePromptBox"></div>';
+  h += '<textarea id="claudePaste" class="claude-ta" rows="5" placeholder="claude.ai（Maxプラン）から返ってきたClaudeの予想をここに貼り付け">' +
+    (claudeEditing ? esc(saved) : "") + "</textarea>";
+  h += '<div class="claude-foot"><button id="saveClaude" class="claude-btn">この内容を「本物のClaude予想」として表示・保存</button>';
+  if (getClaudeKey()) h += '<button id="askClaude" class="claude-btn ghost small">APIで自動取得（有料）</button>';
+  h += "</div>";
+  return h;
+}
+function refreshClaudeOut() { const el = $("claudeOut"); if (el) el.innerHTML = claudeBody(); }
+
+// プロンプトをクリップボードへ（UIは保持。失敗時は手動コピー用に表示）
 async function copyClaudePrompt() {
-  const out = $("claudeOut");
-  if (!out || !lastRender) return;
+  if (!lastRender) return;
   const p = buildClaudePrompt(lastRender.race, lastRender.A);
   let ok = false;
   try { await navigator.clipboard.writeText(p); ok = true; } catch { ok = false; }
-  out.innerHTML =
-    '<div class="claude-copied">' +
-    (ok ? "✅ コピーしました。claude.ai（Maxプラン）の新規チャットに貼り付けてください。"
-        : "下のプロンプトを選択してコピーし、claude.ai に貼り付けてください。") + "</div>" +
-    '<textarea class="claude-ta" readonly rows="6">' + esc(p) + "</textarea>" +
-    '<div class="claude-foot">' +
-    '<a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai を開く ↗</a>' +
-    '<button id="copyClaude" class="claude-btn small">再コピー</button>' +
-    (getClaudeKey() ? '<button id="askClaude" class="claude-btn ghost small">APIで自動実行</button>' : "") +
-    "</div>";
-  const ta = out.querySelector(".claude-ta");
-  if (ta && !ok) { ta.focus(); ta.select(); }
+  const msg = $("claudeCopyMsg");
+  if (msg) msg.textContent = ok ? "✅ コピーしました。claude.ai に貼り付けてください。" : "自動コピー不可。下のプロンプトを手動でコピーしてください。";
+  if (!ok) {
+    const box = $("claudePromptBox");
+    if (box) {
+      box.innerHTML = '<textarea class="claude-ta" readonly rows="5">' + esc(p) + "</textarea>";
+      const ta = box.querySelector("textarea"); if (ta) { ta.focus(); ta.select(); }
+    }
+  }
 }
 
+// 貼り付けられたClaudeの回答を保存して表示
+function saveClaudeReply() {
+  const ta = $("claudePaste");
+  if (!ta) return;
+  const txt = (ta.value || "").trim();
+  const msg = $("claudeCopyMsg");
+  if (!txt) { if (msg) msg.textContent = "貼り付け内容が空です。"; return; }
+  const rid = curRaceId();
+  if (rid) setClaudeSaved(rid, txt);
+  claudeEditing = false;
+  refreshClaudeOut();
+}
+function editClaudeReply() { claudeEditing = true; refreshClaudeOut(); }
+
+// （任意・有料）APIで本物のClaudeを自動取得し、回答として保存
 async function runClaude() {
   const out = $("claudeOut");
   if (!out || !lastRender) return;
-  out.innerHTML = '<div class="spinner"></div>Claudeが分析中…（10〜40秒）';
+  out.innerHTML = '<div class="spinner"></div>Claude(API)が分析中…（10〜40秒）';
   try {
     const txt = await callClaude(buildClaudePrompt(lastRender.race, lastRender.A));
-    out.innerHTML = '<div class="claude-text">' + esc(txt).replace(/\n/g, "<br>") + "</div>" +
-      '<div class="claude-foot"><button id="askClaude" class="claude-btn small">再生成</button>' +
-      '<span class="claude-hint">モデル: ' + CLAUDE_MODEL + '</span></div>';
+    const rid = curRaceId();
+    if (rid) setClaudeSaved(rid, txt);
+    claudeEditing = false;
+    refreshClaudeOut();
   } catch (e) {
-    out.innerHTML = '<div class="status error">Claude呼び出しに失敗しました：' + esc((e && e.message) || e) +
-      '</div><button id="askClaude" class="claude-btn small">再試行</button>';
+    out.innerHTML = '<div class="status error">Claude(API)の取得に失敗：' + esc((e && e.message) || e) + "</div>" +
+      '<button id="editClaude" class="claude-btn small">戻る</button>';
   }
 }
 
@@ -736,15 +784,12 @@ function renderResult(race, A) {
   html += '<div class="claude-comment"><div class="cc-head">🧠 Claude(AI)の予想・総合分析</div>' +
     '<div class="cc-body">' + aiAnalysisHTML(race, A) + "</div></div>";
 
-  // さらに本物のClaude(claude.ai/Maxプラン)に相談 — プロンプト生成（API不要）
-  html += '<div class="section-label">💬 さらに claude.ai（Maxプラン）に相談</div>';
-  html += '<div class="bet-box claude-box"><div id="claudeOut" class="claude-out">';
-  html += '<button id="copyClaude" class="claude-btn">📋 Claude用プロンプトをコピー</button>';
-  html += '<a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai を開く ↗</a>';
-  if (getClaudeKey()) html += '<button id="askClaude" class="claude-btn ghost">APIで自動実行</button>';
-  html += '<p class="claude-hint">このプロンプトを <b>claude.ai（Maxプラン）</b>に貼り付けると、AI視点の本格予想が<b>無料</b>で得られます（API不要）。' +
-    '※ APIキーを⚙️に入れた場合のみ「APIで自動実行」も選べます（有料）。</p>';
-  html += "</div></div>";
+  // 本物のClaudeの予想（claude.ai/Maxプラン）を取り込んで表示・保存（API不要）
+  html += '<div class="section-label">🟣 本物のClaudeの予想（claude.ai / Maxプラン）</div>';
+  html += '<div class="bet-box claude-box"><div id="claudeOut" class="claude-out">' + claudeBody() + "</div>";
+  html += '<p class="claude-hint">Maxプランは外部アプリから自動呼び出しできないため、claude.ai の回答をここに取り込みます（無料）。' +
+    '取り込んだ予想はレースごとに保存され、次に同じレースを開くと再表示されます。⚙️にAPIキーを入れた場合のみ自動取得も可能（有料）。</p>';
+  html += "</div>";
 
   // 3連複 的中率重視プラン（メイン）
   html += '<div class="section-label">🎯 3連複 的中率重視プラン（複数の買い方）</div>';
@@ -1083,6 +1128,8 @@ resultEl.addEventListener("click", (e) => {
   const id = e.target && e.target.id;
   if (id === "copyClaude") copyClaudePrompt();
   else if (id === "askClaude") runClaude();
+  else if (id === "saveClaude") saveClaudeReply();
+  else if (id === "editClaude") editClaudeReply();
 });
 
 // 日付選択（既定=本日JST。前後の日付も選べる）

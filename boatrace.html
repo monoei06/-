@@ -205,6 +205,21 @@ select:disabled { opacity: .55; }
 .cc-head { font-weight: 800; color: #6d28d9; font-size: .9rem; margin-bottom: 4px; }
 .cc-body { font-size: .88rem; line-height: 1.7; color: var(--text); }
 
+/* 直前情報バッジ・気象 */
+.pre-badge {
+  font-size: .62rem; font-weight: 800; padding: 2px 8px; border-radius: 999px;
+  margin-left: 8px; vertical-align: middle;
+}
+.pre-badge.on { background: #16a34a; color: #fff; }
+.pre-badge.off { background: var(--line); color: var(--muted); }
+.cond {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px;
+  font-size: .76rem; color: var(--text); font-weight: 600;
+}
+.cond span { background: var(--bg); padding: 2px 8px; border-radius: 6px; }
+.boat-detail .pre b { color: #7c3aed; }
+.boat-detail .pre { color: #6b21a8; }
+
 /* 各艇のClaude所見 */
 .boat-cmt {
   flex-basis: 100%; margin-top: 8px; padding-top: 8px;
@@ -278,6 +293,10 @@ select:disabled { opacity: .55; }
  * =========================================================================== */
 
 const PROGRAMS_URL = "https://boatraceopenapi.github.io/programs/v2/today.json";
+const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
+
+// 天候番号 → 表示
+const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
 
 // 競艇場番号 → 場名
 const STADIUMS = {
@@ -311,6 +330,12 @@ const WEIGHTS = {
   cls:    0.06,   // 級別
 };
 
+// 直前情報（展示）の加点重み。preview がある時だけスコアに上乗せする。
+const PRE_WEIGHTS = {
+  exhibition: 16,  // 展示タイム（レース内で相対評価。速いほど加点）
+  exhibitST:  6,   // 展示スタートタイミング（鋭いほど加点）
+};
+
 // 予想モデルの温度（小さいほど強い艇に評価が集中＝堅く出る）
 const TEMP = 13;
 
@@ -323,18 +348,34 @@ const resultEl = $("result");
 
 let PROGRAMS = [];          // 全プログラム
 let byStadium = new Map();  // stadium番号 -> [race,...]
+let PREVIEWS = new Map();   // "stadium-race" -> 直前情報
+
+const preKey = (stadium, raceNo) => stadium + "-" + raceNo;
 
 /* ----------------------------- データ取得 ------------------------------ */
 async function loadData() {
-  setStatus('<div class="spinner"></div>本日の出走表を取得中…');
+  setStatus('<div class="spinner"></div>本日の出走表・直前情報を取得中…');
   try {
-    const res = await fetch(PROGRAMS_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const json = await res.json();
+    // 出走表（必須）と直前情報（任意）を並行取得
+    const [progRes, prevRes] = await Promise.all([
+      fetch(PROGRAMS_URL, { cache: "no-store" }),
+      fetch(PREVIEWS_URL, { cache: "no-store" }).catch(() => null),
+    ]);
+    if (!progRes.ok) throw new Error("HTTP " + progRes.status);
+    const json = await progRes.json();
     PROGRAMS = Array.isArray(json.programs) ? json.programs : [];
     if (!PROGRAMS.length) {
       setStatus("本日のレースデータが見つかりませんでした。開催がない可能性があります。", true);
       return;
+    }
+    // 直前情報（取得できた分だけ）
+    PREVIEWS = new Map();
+    if (prevRes && prevRes.ok) {
+      try {
+        const pj = await prevRes.json();
+        for (const p of (pj.previews || []))
+          PREVIEWS.set(preKey(p.race_stadium_number, p.race_number), p);
+      } catch { /* 直前情報なしでも続行 */ }
     }
     groupByStadium();
     populateVenues();
@@ -385,12 +426,13 @@ function populateRaces() {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // 各艇のスコア（0-100目安）を算出。出走表のあらゆる指標を取り込む。
-function scoreBoat(b) {
-  const lane = b.racer_boat_number;
+// pv（直前情報）があれば、枠番ではなく「実際の進入コース」で有利度を評価する。
+function scoreBoat(b, pv) {
+  const course = (pv && pv.racer_course_number) || b.racer_boat_number;
   const pct = (v) => clamp(v || 0, 0, 100);          // %系（0-100）
   const rate = (v) => clamp((v || 0) / 8 * 100, 0, 100); // 勝率系（概ね0-8）
 
-  const courseScore = (COURSE_WIN_RATE[lane] || 0) / 55 * 100;
+  const courseScore = (COURSE_WIN_RATE[course] || 0) / 55 * 100;
   // 平均ST: 0.10秒=満点, 0.25秒=0点（低いほど良い）
   const st = b.racer_average_start_timing;
   const startScore = (st == null) ? 50 : clamp((0.25 - st) / (0.25 - 0.10) * 100, 0, 100);
@@ -419,11 +461,11 @@ function scoreBoat(b) {
 const seq = (n) => Array.from({ length: n }, (_, i) => i);
 
 // Claude流の各艇分析。スコアに加え、コース取り（戦法）と
-// データから読み取れる所見（コメント材料）を生成する。
-function analyzeBoat(b) {
-  const lane = b.racer_boat_number;
-  const score = scoreBoat(b);
+// データから読み取れる所見（コメント材料）を生成する。pv は直前情報。
+function analyzeBoat(b, pv) {
+  const score = scoreBoat(b, pv);
   const tags = [];
+  const course = (pv && pv.racer_course_number) || b.racer_boat_number;
 
   const courseRole = {
     1: "イン逃げの軸",
@@ -432,7 +474,11 @@ function analyzeBoat(b) {
     4: "カドまくりの一発",
     5: "外枠から展開待ち",
     6: "大外で展開待ち",
-  }[lane] || "";
+  }[course] || "";
+
+  // 直前：枠と進入コースが違えば前付け/隊形変化として明記
+  if (pv && pv.racer_course_number && pv.racer_course_number !== b.racer_boat_number)
+    tags.push("⚡" + b.racer_boat_number + "枠→" + pv.racer_course_number + "コース進入");
 
   if (b.racer_class_number === 1) tags.push("A1級の実力者");
   else if (b.racer_class_number === 4) tags.push("B2級で格下");
@@ -456,14 +502,53 @@ function analyzeBoat(b) {
   const f = b.racer_flying_count || 0;
   if (f >= 1) tags.push("F" + f + "持ちで慎重");
 
-  return { b, score, courseRole, tags, w: Math.exp(score / TEMP) };
+  // 直前：チルト・展示ST
+  if (pv) {
+    const tilt = pv.racer_tilt_adjustment;
+    if (tilt != null && tilt >= 0.5) tags.push("チルト" + tilt + "で伸び勝負");
+    const est = pv.racer_start_timing;
+    if (est != null && est <= 0.05) tags.push("展示ST" + est.toFixed(2) + "と好スタート");
+  }
+
+  return { b, pv, score, course, courseRole, tags, w: Math.exp(score / TEMP) };
 }
 
 // Claudeの分析予想。乱数を使わず、Plackett-Luce の閉形式で
 // 各艇の1着/2着/3着確率と3連単(1着-2着-3着)の確率を厳密に計算する。
-function predict(race) {
-  const items = race.boats.map(analyzeBoat);
+// preview があれば直前情報（進入・展示）を反映する。
+function predict(race, preview) {
+  const items = race.boats.map((b) => {
+    const pv = preview && preview.boats ? preview.boats[String(b.racer_boat_number)] : null;
+    return analyzeBoat(b, pv);
+  });
   const n = items.length;
+
+  // 直前：展示タイムをレース内で相対評価して加点（速いほど高評価）
+  const exTimes = items.map((x) => x.pv && x.pv.racer_exhibition_time).filter((t) => t != null);
+  if (exTimes.length >= 2) {
+    const min = Math.min(...exTimes), max = Math.max(...exTimes);
+    items.forEach((x) => {
+      const t = x.pv && x.pv.racer_exhibition_time;
+      if (t != null && max > min) {
+        x.exScore = (max - t) / (max - min) * 100;     // 0-100
+        x.score += PRE_WEIGHTS.exhibition * (x.exScore / 100);
+        // 展示タイム上位はタグでも明示
+      }
+      // 展示STの鋭さも軽く加点
+      const est = x.pv && x.pv.racer_start_timing;
+      if (est != null) {
+        const stScore = clamp((0.20 - est) / (0.20 - (-0.05)) * 100, 0, 100);
+        x.score += PRE_WEIGHTS.exhibitST * (stScore / 100);
+      }
+      x.w = Math.exp(x.score / TEMP); // 加点後に強さを再計算
+    });
+    // 展示最速にタグ付け
+    const fastest = items.reduce((a, x) =>
+      (x.pv && x.pv.racer_exhibition_time != null &&
+       (!a || x.pv.racer_exhibition_time < a.pv.racer_exhibition_time)) ? x : a, null);
+    if (fastest) fastest.tags.unshift("展示タイム最速" + fastest.pv.racer_exhibition_time.toFixed(2));
+  }
+
   const W = items.reduce((s, x) => s + x.w, 0);
 
   const p2 = Array(n).fill(0), p3 = Array(n).fill(0);
@@ -499,15 +584,20 @@ function predict(race) {
   combos.sort((a, b) => b.prob - a.prob);
   items.sort((a, b) => b.p1 - a.p1); // 1着確率の高い順＝予想印順
 
-  return { ranked: items, combos, comment: raceComment(items) };
+  const hasPreview = !!(preview && preview.boats);
+  return {
+    ranked: items, combos, hasPreview, preview,
+    comment: raceComment(items, hasPreview),
+  };
 }
 
 // Claudeのレース総評を文章で生成
-function raceComment(ranked) {
+function raceComment(ranked, hasPreview) {
   const nm = (x) => x.b.racer_boat_number + "号艇" + (x.b.racer_name ? "・" + x.b.racer_name : "");
   const o = ranked[0], t = ranked[1], s = ranked[2], a = ranked[3];
-  let txt = "本命は" + nm(o) + "。" + o.courseRole +
-            "で1着率" + o.p1.toFixed(0) + "%、最も信頼できる。";
+  let txt = hasPreview ? "【直前情報を反映】" : "【出走表のみ・直前情報待ち】";
+  txt += "本命は" + nm(o) + "。" + o.courseRole +
+         "で1着率" + o.p1.toFixed(0) + "%、最も信頼できる。";
   if (o.tags[0]) txt += "（" + o.tags[0] + "）";
   txt += "対抗は" + nm(t) + "、" + (t.tags[0] || t.courseRole) + "。";
   txt += "3着付けに" + nm(s) + "を加えたい。";
@@ -561,7 +651,7 @@ function pickTiers(frontier) {
 const MARKS = ["◎", "○", "▲", "△", "×", ""];
 
 function renderResult(race, pred) {
-  const { ranked, combos, comment } = pred;
+  const { ranked, combos, comment, hasPreview, preview } = pred;
   const stadium = STADIUMS[race.race_stadium_number] || "場" + race.race_stadium_number;
   const grade = race.race_grade_number;
   const maxP1 = Math.max(ranked[0].p1, 1);
@@ -572,11 +662,26 @@ function renderResult(race, pred) {
   html += '<div class="race-head">';
   html += '<div class="rh-title">';
   if (GRADES[grade]) html += '<span class="badge grade-' + grade + '">' + GRADES[grade] + "</span>";
-  html += stadium + " " + race.race_number + "R" + "</div>";
+  html += stadium + " " + race.race_number + "R";
+  html += hasPreview
+    ? '<span class="pre-badge on">直前情報あり</span>'
+    : '<span class="pre-badge off">直前情報まだ</span>';
+  html += "</div>";
   html += '<div class="rh-sub">' + esc(race.race_title || "") +
           (race.race_subtitle ? " ／ " + esc(race.race_subtitle) : "") +
           " ・ " + (race.race_distance || "?") + "m" +
           " ・ 締切 " + (race.race_closed_at || "").slice(11, 16) + "</div>";
+  // 直前：気象コンディション
+  if (hasPreview) {
+    const w = WEATHER[preview.race_weather_number] || "";
+    html += '<div class="cond">' +
+      (w ? '<span>' + w + "</span>" : "") +
+      '<span>🌬️風 ' + (preview.race_wind != null ? preview.race_wind + "m" : "-") + "</span>" +
+      '<span>🌊波 ' + (preview.race_wave != null ? preview.race_wave + "cm" : "-") + "</span>" +
+      '<span>🌡️気温 ' + (preview.race_temperature != null ? preview.race_temperature + "℃" : "-") + "</span>" +
+      '<span>💧水温 ' + (preview.race_water_temperature != null ? preview.race_water_temperature + "℃" : "-") + "</span>" +
+      "</div>";
+  }
   html += "</div>";
 
   // Claudeの総評
@@ -627,6 +732,12 @@ function boatCard(x, i, maxP1) {
   h += "<span>3着率: <b>" + x.p3.toFixed(1) + "%</b></span>";
   h += "<span>3着内率: <b>" + x.in3.toFixed(1) + "%</b></span>";
   h += "<span>モーター2連: <b>" + fmt(b.racer_assigned_motor_top_2_percent) + "%</b></span>";
+  if (x.pv) {
+    h += '<span class="pre">進入: <b>' + (x.pv.racer_course_number || lane) + "コース</b></span>";
+    h += '<span class="pre">展示T: <b>' + (x.pv.racer_exhibition_time != null ? x.pv.racer_exhibition_time.toFixed(2) : "-") + "</b></span>";
+    h += '<span class="pre">展示ST: <b>' + (x.pv.racer_start_timing != null ? x.pv.racer_start_timing.toFixed(2) : "-") + "</b></span>";
+    h += '<span class="pre">チルト: <b>' + (x.pv.racer_tilt_adjustment != null ? x.pv.racer_tilt_adjustment : "-") + "</b></span>";
+  }
   h += "</div>";
   // Claudeの所見
   const cmt = (x.courseRole ? x.courseRole : "") + (x.tags.length ? "。" + x.tags.join("・") : "");
@@ -716,7 +827,8 @@ predictBtn.addEventListener("click", () => {
   const list = byStadium.get(Number(venueSel.value)) || [];
   const race = list.find((r) => r.race_number === Number(raceSel.value));
   if (!race) return;
-  renderResult(race, predict(race));
+  const preview = PREVIEWS.get(preKey(race.race_stadium_number, race.race_number));
+  renderResult(race, predict(race, preview));
 });
 
 loadData();

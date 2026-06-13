@@ -194,6 +194,21 @@ select:disabled { opacity: .55; }
 .cc-head { font-weight: 800; color: #6d28d9; font-size: .9rem; margin-bottom: 4px; }
 .cc-body { font-size: .88rem; line-height: 1.7; color: var(--text); }
 
+/* 直前情報バッジ・気象 */
+.pre-badge {
+  font-size: .62rem; font-weight: 800; padding: 2px 8px; border-radius: 999px;
+  margin-left: 8px; vertical-align: middle;
+}
+.pre-badge.on { background: #16a34a; color: #fff; }
+.pre-badge.off { background: var(--line); color: var(--muted); }
+.cond {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px;
+  font-size: .76rem; color: var(--text); font-weight: 600;
+}
+.cond span { background: var(--bg); padding: 2px 8px; border-radius: 6px; }
+.boat-detail .pre b { color: #7c3aed; }
+.boat-detail .pre { color: #6b21a8; }
+
 /* 各艇のClaude所見 */
 .boat-cmt {
   flex-basis: 100%; margin-top: 8px; padding-top: 8px;

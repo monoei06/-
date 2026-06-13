@@ -168,8 +168,21 @@ select:disabled { opacity: .55; }
   display: inline-block; font-weight: 800; font-size: 1.15rem; letter-spacing: .04em;
   background: var(--bg); padding: 8px 14px; border-radius: 8px; margin: 3px 6px 3px 0;
 }
-.bet-note { font-size: .74rem; color: var(--muted); margin-top: 4px; }
+.bet-note { font-size: .74rem; color: var(--muted); margin-top: 6px; }
 .combo-num { display: inline-block; min-width: 1.3em; }
+
+/* 3連単フォーメーション */
+.fm-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.fm-pos { width: 34px; flex-shrink: 0; font-weight: 800; color: var(--navy); font-size: .85rem; }
+.fm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fm-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 36px; height: 32px; padding: 0 8px;
+  border-radius: 8px; font-weight: 800; font-size: .95rem;
+  border: 2px solid rgba(0,0,0,.12);
+}
+.fm-summary { margin-top: 10px; font-size: .9rem; font-weight: 700; color: var(--text); }
+.fm-summary b { color: var(--accent); font-size: 1.1rem; }
 
 .app-footer { max-width: 640px; margin: 0 auto; padding: 8px 16px 32px; text-align: center; color: var(--muted); }
 .app-footer a { color: var(--navy); }

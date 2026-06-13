@@ -179,8 +179,8 @@ function renderResult(race, ranked) {
     html += boatCard(x, i, maxScore, true);
   });
 
-  // 買い目提案
-  html += '<div class="section-label">💴 おすすめ買い目</div>';
+  // 買い目提案（3連単フォーメーション）
+  html += '<div class="section-label">💴 3連単フォーメーション</div>';
   html += renderBets(ranked);
 
   resultEl.innerHTML = html;
@@ -222,52 +222,66 @@ function boatCard(x, i, maxScore, detail) {
   return h;
 }
 
+// 3連単フォーメーションのみを提案する。
+// 1着の信頼度（◎の勝率）に応じて「点数を絞る／広げる」を自動で切り替え、
+// 期待的中率を高く保つ＝勝ちにいくフォーメーションを組む。
 function renderBets(ranked) {
-  const n = ranked.map((x) => x.b.racer_boat_number); // スコア順の艇番
-  const [a, bb, c, d] = n;
-
+  const topProb = ranked[0].prob; // ◎の勝率(%)
   let h = "";
 
-  // 本命 3連単（◎→○▲→○▲△）
-  h += '<div class="bet-box">';
-  h += '<div class="bet-type">3連単・本命（◎1着固定）</div>';
-  h += combo(a, "-", bb, "-", c);
-  h += combo(a, "-", c, "-", bb);
-  h += '<div class="bet-note">◎の1着を信頼し、相手を○▲で。手堅く狙う2点。</div>';
-  h += "</div>";
-
-  // 3連単・抑え（◎○の2艇軸ながし）
-  h += '<div class="bet-box">';
-  h += '<div class="bet-type">3連単・抑え（◎○ 2艇軸ながし）</div>';
-  h += combo(a, "-", bb, "-", c) + combo(a, "-", bb, "-", d);
-  h += combo(bb, "-", a, "-", c) + combo(bb, "-", a, "-", d);
-  h += '<div class="bet-note">◎と○の1-2着入れ替え＋3着に▲△。波乱もケアする4点。</div>';
-  h += "</div>";
-
-  // 3連複ボックス（上位3艇）
-  h += '<div class="bet-box">';
-  h += '<div class="bet-type">3連複・手堅く（上位3艇BOX）</div>';
-  h += combo(a, "=", bb, "=", c);
-  h += '<div class="bet-note">' + a + "・" + bb + "・" + c + " の3艇が3着内に入れば的中（1点）。</div>";
-  h += "</div>";
-
-  // 2連単・本命
-  h += '<div class="bet-box">';
-  h += '<div class="bet-type">2連単・シンプル</div>';
-  h += combo(a, "-", bb) + combo(a, "-", c);
-  h += '<div class="bet-note">◎の頭から○▲へ。当てやすさ重視。</div>';
-  h += "</div>";
+  // ◎の信頼度が高いほど相手を絞り、低いほど手広くケアする
+  if (topProb >= 45) {
+    // 鉄板級：◎1着固定で少点数。回収効率を最優先。
+    h += formationBox("鉄板・本命1着固定", [0], [1, 2], [1, 2, 3], ranked,
+      "◎の1着勝率が高い堅いレース。◎頭固定で2-3着のみ流す高効率フォーメーション。");
+    h += formationBox("本命・少し保険", [0], [1, 2, 3], [1, 2, 3], ranked,
+      "3着を1枠だけ広げて取りこぼしをケア。");
+  } else if (topProb >= 30) {
+    // 標準：◎1着固定＋相手を厚めに。最も勝率の高い王道型。
+    h += formationBox("本命・王道（おすすめ）", [0], [1, 2, 3], [1, 2, 3, 4], ranked,
+      "◎1着固定で相手を厚めにカバー。的中率と回収のバランスが最も良い本命フォーメーション。");
+    h += formationBox("本命・手堅く絞り", [0], [1, 2], [1, 2, 3], ranked,
+      "点数を抑えたい時用。◎-○▲-○▲△の少点数。");
+  } else {
+    // 混戦：◎○の2艇軸で頭の入れ替わりに対応。
+    h += formationBox("混戦・2艇軸（おすすめ）", [0, 1], [0, 1, 2], [0, 1, 2, 3, 4], ranked,
+      "頭が割れそうな混戦。◎○どちらが1着でも対応し、3着を手広くケアする勝負型。");
+    h += formationBox("混戦・本命頭で勝負", [0], [1, 2, 3], [1, 2, 3, 4], ranked,
+      "それでも◎の頭を信じるなら。1着固定で相手総流し。");
+  }
 
   return h;
 }
 
-function combo(...parts) {
-  let s = '<span class="bet-combo">';
-  for (const p of parts) {
-    if (p === "-" || p === "=") s += '<span style="color:var(--muted)"> ' + (p === "=" ? "=" : "→") + " </span>";
-    else s += '<span class="combo-num">' + p + "</span>";
+// 1着/2着/3着の候補（ranked内のインデックス集合）から3連単フォーメーションを描画
+function formationBox(title, s1, s2, s3, ranked, note) {
+  const pts = countTrifecta(s1, s2, s3);
+  let h = '<div class="bet-box">';
+  h += '<div class="bet-type">3連単 ' + title + "</div>";
+  h += fmRow("1着", s1, ranked);
+  h += fmRow("2着", s2, ranked);
+  h += fmRow("3着", s3, ranked);
+  h += '<div class="fm-summary">' + pts + "点 = <b>" + (pts * 100).toLocaleString() + "円</b>（100円/点）</div>";
+  h += '<div class="bet-note">' + note + "</div>";
+  h += "</div>";
+  return h;
+}
+
+function fmRow(label, set, ranked) {
+  let h = '<div class="fm-row"><span class="fm-pos">' + label + '</span><span class="fm-chips">';
+  for (const i of set) {
+    const lane = ranked[i].b.racer_boat_number;
+    h += '<span class="fm-chip lane-' + lane + '">' + (MARKS[i] || "") + lane + "</span>";
   }
-  return s + "</span>";
+  return h + "</span></div>";
+}
+
+// フォーメーションの有効点数（1着≠2着≠3着の順列組合せ数）
+function countTrifecta(s1, s2, s3) {
+  let n = 0;
+  for (const a of s1) for (const b of s2) for (const c of s3)
+    if (a !== b && b !== c && a !== c) n++;
+  return n;
 }
 
 /* ----------------------------- ユーティリティ --------------------------- */

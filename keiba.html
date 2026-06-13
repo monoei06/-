@@ -35,8 +35,10 @@
       <input id="proxyUrl" type="url" inputmode="url" autocapitalize="off" autocomplete="off"
              placeholder="https://xxxxx.workers.dev" />
       <p class="hint">中央競馬には公式の無料JSON APIが無いため、netkeiba から出走表・オッズを取得する
-      <b>データサーバー（Cloudflare Workers / 無料）</b>を一度だけ用意し、その URL を貼り付けます。
-      設定方法は <code>worker/KEIBA-README.md</code> を参照。設定後は保存され、以後そのまま使えます。</p>
+      <b>データサーバー（無料）</b>を一度だけ用意し、その URL を貼り付けます（設定後は保存されます）。<br>
+      ・<b>Cloudflare Workers 版</b> → <code>worker/KEIBA-README.md</code><br>
+      ・<b>Google Apps Script 版</b> → <code>worker/KEIBA-GAS-README.md</code>（Cloudflareで
+      <code>HTTP 400</code> が出る場合はこちら。netkeibaがCloudflareのIPを弾くことがあります）</p>
     </details>
   </section>
 

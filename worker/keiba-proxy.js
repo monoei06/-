@@ -216,10 +216,25 @@ function parseRaceHead(html) {
 /* ----------------------------- 共通ユーティリティ ------------------------------ */
 async function fetchText(target, enc, extraHeaders) {
   const res = await fetch(target, {
-    headers: { "User-Agent": UA, "Accept-Language": "ja", ...(extraHeaders || {}) },
+    headers: {
+      "User-Agent": UA,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "ja,en;q=0.9",
+      "Referer": "https://race.netkeiba.com/top/race_list.html",
+      ...(extraHeaders || {}),
+    },
     cf: { cacheTtl: 20, cacheEverything: true },
   });
-  if (!res.ok) throw new Error("netkeiba HTTP " + res.status + " @ " + target);
+  if (!res.ok) {
+    // 診断用に本文の冒頭を付与（netkeiba が Cloudflare のIPを弾くと 400/403 になることがある）
+    let snippet = "";
+    try { snippet = (await res.text()).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160); } catch { /* noop */ }
+    const e = new Error("netkeiba HTTP " + res.status + " @ " + target +
+      (res.status === 400 || res.status === 403
+        ? "（Cloudflare からのアクセスが拒否された可能性。worker/KEIBA-GAS-README.md の Google Apps Script 版をお試しください）"
+        : "") + (snippet ? " :: " + snippet : ""));
+    throw e;
+  }
   if (enc && /euc/i.test(enc)) {
     const buf = await res.arrayBuffer();
     return new TextDecoder("euc-jp").decode(buf);

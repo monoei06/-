@@ -29,9 +29,11 @@ JRA（中央競馬）の**本日の全レース**について、**市場オッ�
 
 ## 使い方
 
-1. **一度だけ**データサーバー（Cloudflare Workers / 無料）を用意します
-   → 手順は [`worker/KEIBA-README.md`](worker/KEIBA-README.md)（`keiba-proxy.js` を貼り付けるだけ）。
-2. アプリの **⚙️データサーバー設定** に Worker の URL を貼り付け（保存されます）。
+1. **一度だけ**データサーバー（無料）を用意します。次のどちらかを選べます：
+   - **Cloudflare Workers 版** → [`worker/KEIBA-README.md`](worker/KEIBA-README.md)（`keiba-proxy.js` を貼り付け）
+   - **Google Apps Script 版** → [`worker/KEIBA-GAS-README.md`](worker/KEIBA-GAS-README.md)（`keiba-gas.gs` を貼り付け）
+     ※ Cloudflare 版で `HTTP 400` が返る場合はこちら（netkeiba が Cloudflare のIPを弾くことがあります）。
+2. アプリの **⚙️データサーバー設定** に そのURL を貼り付け（保存されます）。
 3. 「開催」と「レース」を選んで「**予想する**」。
 
 > なぜサーバーが要るの？ 中央競馬には**無料の公式JSON APIが無く**、netkeiba 等は

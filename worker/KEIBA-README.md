@@ -8,6 +8,11 @@
 
 > 🚤 ボートレース用 `boatrace-proxy.js` と同じ手順です。すでにデプロイ経験があれば数分です。
 
+> ⚠️ **`{"error":"netkeiba HTTP 400 ..."}` が返る場合**：netkeiba が Cloudflare の
+> データセンターIPからのアクセスを弾いています（ヘッダ調整では直りません）。その場合は
+> **[Google Apps Script 版（`KEIBA-GAS-README.md`）](KEIBA-GAS-README.md)** に切り替えてください。
+> GAS は Google のIPで動くため取得できることが多いです。
+
 ---
 
 ## 方法A：ダッシュボードに貼り付け（最速・5分・PC/スマホ可）

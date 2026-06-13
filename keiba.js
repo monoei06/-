@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v6（3連複 的中率重視プラン）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v7（Claude本格予想プロンプト・3連複）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -35,6 +35,119 @@ const resultEl = $("result");
 
 let MEETINGS = [];           // [{place, place_code, meeting, races:[...]}]
 let RACE_CACHE = new Map();  // race_id -> detail
+
+/* ----------------------------- Claude（本格予想・AI視点） ------------------------------ */
+const CLAUDE_KEY_LS = "keiba_anthropic_key";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const CLAUDE_SYSTEM =
+  "あなたは日本の中央競馬(JRA)に精通した、冷静で正直な予想アナリストです。与えられたオッズ・確率・近走データのみを根拠に、" +
+  "3連複を中心とした現実的な予想を簡潔に述べます。データに無い事実は創作しないこと。競馬は分散が大きく、市場(オッズ)が最良の予測である" +
+  "ことを理解し、必勝や過度な自信を示さないこと。出力は見出し付きの短い箇条書き中心で、全体800字以内、日本語で。";
+let claudeKeyMem = "";
+function getClaudeKey() {
+  try { return (localStorage.getItem(CLAUDE_KEY_LS) || claudeKeyMem || "").trim(); }
+  catch { return claudeKeyMem.trim(); }
+}
+function setClaudeKey(v) {
+  claudeKeyMem = (v || "").trim();
+  try { localStorage.setItem(CLAUDE_KEY_LS, claudeKeyMem); } catch { /* file:// */ }
+}
+let lastRender = null; // { race, A } 直近の予想（Claude呼び出し用）
+
+async function callClaude(prompt) {
+  const key = getClaudeKey();
+  if (!key) throw new Error("Anthropic APIキーが未設定です（⚙️で設定）");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1800,
+      system: CLAUDE_SYSTEM,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.text()).slice(0, 200); } catch { /* noop */ }
+    throw new Error("HTTP " + res.status + (detail ? " " + detail : ""));
+  }
+  const j = await res.json();
+  if (j.stop_reason === "refusal") return "（安全上の理由で回答が見送られました）";
+  return (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+}
+
+// 予想結果(A)からClaudeへのプロンプトを組み立てる
+function buildClaudePrompt(race, A) {
+  const R = A.items;
+  const lines = R.map((x, i) => {
+    const h = x.h, ps = pastSummary(h.past);
+    return (MARKS[i] || "・") + " " + x.idxNum + "番 " + (h.name || "") +
+      "（" + (h.sexage || "") + (h.jockey ? " " + h.jockey : "") + "）" +
+      " 単勝" + (h.win_odds != null ? h.win_odds + "倍" : "-") + "/" + (h.popularity || "-") + "人気" +
+      " AI勝率" + x.p1.toFixed(1) + "% 複勝率" + x.in3.toFixed(0) + "%" +
+      (h.weight_diff != null ? " 馬体重" + (h.weight_diff > 0 ? "+" : "") + h.weight_diff : "") +
+      (ps && ps.best != null ? " 近走指数best" + ps.best + (ps.trend >= 5 ? "↑" : ps.trend <= -5 ? "↓" : "") : "");
+  }).join("\n");
+  const plans = buildTrioPlans(A).sort((a, b) => b.hit - a.hit).slice(0, 5)
+    .map((p) => "・" + p.label + "：的中率" + p.hit.toFixed(0) + "% " + p.pts + "点").join("\n");
+  const depth = A.depth;
+  return "以下は " + race.place + race.race_no + "R「" + (race.name || "") + "」" +
+    (race.course || "") + (race.direction ? "(" + race.direction + ")" : "") +
+    (race.track_condition ? " 馬場" + race.track_condition : "") +
+    (race.weather ? " 天候" + race.weather : "") + " の出走馬と、市場オッズに基づく確率です。\n\n" +
+    "【出走馬（AI勝率＝市場オッズ由来の順）】\n" + lines + "\n" +
+    "（複勝率は" + depth + "着内率。近走指数は基準タイム比の参考値・馬場/クラス未補正）\n\n" +
+    "【3連複プラン候補（モデル算出の的中率）】\n" + plans + "\n\n" +
+    "この情報をもとに、AIならではの視点でこのレースを分析してください。3連複で当てにいく前提で：\n" +
+    "1) レースの構図（展開・人気の信頼度・波乱度）を簡潔に\n" +
+    "2) 軸にすべき馬とその理由\n" +
+    "3) 相手（ヒモ）候補。妙味のある人気薄がいれば指摘\n" +
+    "4) おすすめの3連複の買い目（軸／相手と点数）を1つ具体的に\n" +
+    "5) 外れ筋・リスクを一言\n" +
+    "市場が最良の予測である点を踏まえ、過信せず簡潔に。";
+}
+
+// claude.ai(Maxプラン等)に貼り付けるプロンプトを生成してクリップボードへ。API不要・無料。
+async function copyClaudePrompt() {
+  const out = $("claudeOut");
+  if (!out || !lastRender) return;
+  const p = buildClaudePrompt(lastRender.race, lastRender.A);
+  let ok = false;
+  try { await navigator.clipboard.writeText(p); ok = true; } catch { ok = false; }
+  out.innerHTML =
+    '<div class="claude-copied">' +
+    (ok ? "✅ コピーしました。claude.ai（Maxプラン）の新規チャットに貼り付けてください。"
+        : "下のプロンプトを選択してコピーし、claude.ai に貼り付けてください。") + "</div>" +
+    '<textarea class="claude-ta" readonly rows="6">' + esc(p) + "</textarea>" +
+    '<div class="claude-foot">' +
+    '<a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai を開く ↗</a>' +
+    '<button id="copyClaude" class="claude-btn small">再コピー</button>' +
+    (getClaudeKey() ? '<button id="askClaude" class="claude-btn ghost small">APIで自動実行</button>' : "") +
+    "</div>";
+  const ta = out.querySelector(".claude-ta");
+  if (ta && !ok) { ta.focus(); ta.select(); }
+}
+
+async function runClaude() {
+  const out = $("claudeOut");
+  if (!out || !lastRender) return;
+  out.innerHTML = '<div class="spinner"></div>Claudeが分析中…（10〜40秒）';
+  try {
+    const txt = await callClaude(buildClaudePrompt(lastRender.race, lastRender.A));
+    out.innerHTML = '<div class="claude-text">' + esc(txt).replace(/\n/g, "<br>") + "</div>" +
+      '<div class="claude-foot"><button id="askClaude" class="claude-btn small">再生成</button>' +
+      '<span class="claude-hint">モデル: ' + CLAUDE_MODEL + '</span></div>';
+  } catch (e) {
+    out.innerHTML = '<div class="status error">Claude呼び出しに失敗しました：' + esc((e && e.message) || e) +
+      '</div><button id="askClaude" class="claude-btn small">再試行</button>';
+  }
+}
 
 /* ----------------------------- データサーバー設定 ------------------------------ */
 let proxyUrlMem = "";
@@ -592,6 +705,7 @@ function chip(x, rankIdx) {
 function numName(x) { return x.idxNum + "番 " + (x.h.name || ""); }
 
 function renderResult(race, A) {
+  lastRender = { race, A };
   const { bets, depth } = buildBets(A, race);
   const ranked = A.items;
 
@@ -621,6 +735,16 @@ function renderResult(race, A) {
   // AI総評
   html += '<div class="claude-comment"><div class="cc-head">🧠 AIの予想</div>' +
     '<div class="cc-body">' + esc(raceComment(ranked, depth, A)) + "</div></div>";
+
+  // Claudeの本格予想（AI視点）— claude.ai(Maxプラン)に貼るプロンプトを生成（API不要）
+  html += '<div class="section-label">🧠 Claudeの本格予想（AI視点）</div>';
+  html += '<div class="bet-box claude-box"><div id="claudeOut" class="claude-out">';
+  html += '<button id="copyClaude" class="claude-btn">📋 Claude用プロンプトをコピー</button>';
+  html += '<a class="claude-link" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai を開く ↗</a>';
+  if (getClaudeKey()) html += '<button id="askClaude" class="claude-btn ghost">APIで自動実行</button>';
+  html += '<p class="claude-hint">このプロンプトを <b>claude.ai（Maxプラン）</b>に貼り付けると、AI視点の本格予想が<b>無料</b>で得られます（API不要）。' +
+    '※ APIキーを⚙️に入れた場合のみ「APIで自動実行」も選べます（有料）。</p>';
+  html += "</div></div>";
 
   // 3連複 的中率重視プラン（メイン）
   html += '<div class="section-label">🎯 3連複 的中率重視プラン（複数の買い方）</div>';
@@ -874,6 +998,22 @@ if (proxyInput) {
   proxyInput.addEventListener("change", save);
   proxyInput.addEventListener("blur", save);
 }
+
+// Anthropic APIキー（任意・自動実行用）
+const claudeKeyInput = $("claudeKey");
+if (claudeKeyInput) {
+  claudeKeyInput.value = getClaudeKey();
+  const saveK = () => setClaudeKey(claudeKeyInput.value);
+  claudeKeyInput.addEventListener("change", saveK);
+  claudeKeyInput.addEventListener("blur", saveK);
+}
+
+// Claudeボタン（プロンプトコピー／任意のAPI自動実行）の委譲ハンドラ
+resultEl.addEventListener("click", (e) => {
+  const id = e.target && e.target.id;
+  if (id === "copyClaude") copyClaudePrompt();
+  else if (id === "askClaude") runClaude();
+});
 
 // 日付選択（既定=本日JST。前後の日付も選べる）
 if (dateSel) {

@@ -51,6 +51,11 @@
       ・<b>Cloudflare Workers 版</b> → <code>worker/KEIBA-README.md</code><br>
       ・<b>Google Apps Script 版</b> → <code>worker/KEIBA-GAS-README.md</code>（Cloudflareで
       <code>HTTP 400</code> が出る場合はこちら。netkeibaがCloudflareのIPを弾くことがあります）</p>
+      <input id="claudeKey" type="password" autocapitalize="off" autocomplete="off"
+             placeholder="sk-ant-... （任意：Claude本格予想用）" />
+      <p class="hint">Anthropic の API キーを入れると「🧠 Claudeに予想させる」でAI視点の本格予想が使えます。
+      キーは<b>この端末のブラウザ内のみ</b>に保存され、Anthropic への送信以外に使いません。
+      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">キー取得</a>（モデル: claude-opus-4-8。1回あたり数円〜数十円）</p>
     </details>
   </section>
 

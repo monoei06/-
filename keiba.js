@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v16（EV最大化の3連複・統計バリューベッティング）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v17（オッズ×データ混合で予想）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -23,10 +23,47 @@ const PROXY_KEY = "keiba_proxy_url";
 function stanceBeta() {
   return ({ std: 1.00, kata: 1.10, ana: 0.90 })[(stanceSel && stanceSel.value) || "std"] || 1.00;
 }
+// データ反映度 λ（0=オッズのみ, 0.5=半々, 0.7=データ重視）
+function dataLambda() {
+  const v = (dataSel && dataSel.value) || "std";
+  return ({ off: 0, o20: 0.2, std: 0.5, d70: 0.7 })[v] != null ? ({ off: 0, o20: 0.2, std: 0.5, d70: 0.7 })[v] : 0.5;
+}
+// 近走データから各馬の実力スコア（オッズ非依存）。データが無ければ null。
+function horseFScore(h) {
+  const ps = pastSummary(h.past);
+  if (!ps || ps.best == null) return null;
+  let s = ps.best + 0.3 * (ps.trend || 0);                 // 近走ベスト指数＋上昇度
+  if (h.weight_diff != null && Math.abs(h.weight_diff) >= 15) s -= 3; // 大幅な馬体重変動は減点
+  return s;
+}
+// 市場確率(mp)とデータ確率を対数線形プーリングで混合し x.base を設定。
+// 返り値: データ混合を実際に行ったか（データのある馬が3頭以上）。
+function applyDataBlend(items, lambda) {
+  items.forEach((x) => { x.base = x.mp; });
+  if (lambda <= 0) return false;
+  const D = items.filter((x) => horseFScore(x.h) != null);
+  if (D.length < 3) return false;                          // データ不足→オッズのみ
+  const T = 9;                                             // データ確率の温度
+  const sc = D.map((x) => horseFScore(x.h));
+  const mx = Math.max.apply(null, sc);
+  const exps = sc.map((s) => Math.exp((s - mx) / T));
+  const se = exps.reduce((a, b) => a + b, 0);
+  const massD = D.reduce((a, x) => a + x.mp, 0);           // データ馬の市場確率の合計に合わせる
+  D.forEach((x, i) => { x.pdata = exps[i] / se * massD; });
+  let sum = 0;
+  items.forEach((x) => {
+    const pd = (x.pdata != null) ? x.pdata : x.mp;
+    x.base = Math.pow(Math.max(x.mp, 1e-9), 1 - lambda) * Math.pow(Math.max(pd, 1e-9), lambda);
+    sum += x.base;
+  });
+  if (sum > 0) items.forEach((x) => { x.base = x.base / sum; });
+  return true;
+}
 
 const $ = (id) => document.getElementById(id);
 const dateSel = $("datePick");
 const stanceSel = $("stance");
+const dataSel = $("dataw");
 const venueSel = $("venue");
 const raceSel = $("race");
 const predictBtn = $("predict");
@@ -447,9 +484,10 @@ function analyze(horses, pools) {
   const mk = marketProbs(horses);
   const n = mk.items.length;
   const beta = stanceBeta();
-  const items = mk.items.map((x) => ({
-    h: x.h, mp: x.p, w: Math.pow(Math.max(x.p, 1e-9), beta),
-  }));
+  const lambda = dataLambda();
+  const items = mk.items.map((x) => ({ h: x.h, mp: x.p }));
+  const dataUsed = applyDataBlend(items, lambda);          // x.base を設定（データ混合）
+  items.forEach((x) => { x.w = Math.pow(Math.max(x.base != null ? x.base : x.mp, 1e-9), beta); });
   const wsum = items.reduce((s, x) => s + x.w, 0);
   items.forEach((x) => { x.idxNum = x.h.num; });
 
@@ -505,6 +543,7 @@ function analyze(horses, pools) {
   return {
     items, n, beta, depth, exacta, trio, wide: wideExact, quinella, trifecta, triMap,
     pools: pools || null, basis: mk.basis, overround: mk.overround,
+    dataUsed, dataLambda: lambda,
   };
 }
 
@@ -979,6 +1018,8 @@ function renderResult(race, A) {
     A.n + "頭立て ・ " +
     (A.basis === "odds" ? (A.status === "result" ? "確定オッズ" : "オッズ反映") : A.basis === "pop" ? "人気順(オッズ未発表)" : "均等") +
     (A.overround ? "（過剰率 " + Math.round(A.overround * 100) + "%）" : "") +
+    (A.dataUsed ? " ／ <b>データ反映 " + Math.round(A.dataLambda * 100) + "%</b>（近走指数）"
+      : (A.dataLambda > 0 ? " ／ データ反映ON（近走データ不足のためオッズのみ）" : "")) +
     "</div>";
   // 文脈チップ（馬場・天候など。確率には混ぜず情報提示）
   const ctx = [];
@@ -1351,10 +1392,10 @@ if (dateSel) {
   });
 }
 
-// スタンス変更 → 表示中レースを即再計算
-if (stanceSel) stanceSel.addEventListener("change", () => {
-  if (!resultEl.hidden && raceSel.value) runPrediction();
-});
+// スタンス／データ反映度の変更 → 表示中レースを即再計算
+function rerunIfShown() { if (!resultEl.hidden && raceSel.value) runPrediction(); }
+if (stanceSel) stanceSel.addEventListener("change", rerunIfShown);
+if (dataSel) dataSel.addEventListener("change", rerunIfShown);
 
 const verEl = $("version");
 if (verEl) verEl.textContent = "ビルド: " + APP_VERSION;

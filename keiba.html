@@ -38,6 +38,15 @@
         <option value="ana">穴（本命依存を弱め妙味重視・的中率は下がる）</option>
       </select>
     </div>
+    <div class="control-row">
+      <label for="dataw">データ反映</label>
+      <select id="dataw">
+        <option value="off">オッズのみ（0%）</option>
+        <option value="o20">ややデータ（20%）</option>
+        <option value="std" selected>データ半々（50%）</option>
+        <option value="d70">データ重視（70%）</option>
+      </select>
+    </div>
     <div class="btn-row">
       <button id="predict" class="predict-btn" disabled>予想する</button>
       <button id="refresh" class="refresh-btn" title="最新オッズ・出走表を再取得">🔄</button>

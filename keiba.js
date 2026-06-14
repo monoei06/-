@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v14（3連複の的中率改善・複勝基準＋広め＋8頭BOX）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v15（妙味EVを買い目とClaudeに反映）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -152,7 +152,12 @@ function buildClaudePrompt(race, A) {
       (ps && ps.best != null ? " 近走指数best" + ps.best + (ps.trend >= 5 ? "↑" : ps.trend <= -5 ? "↓" : "") : "");
   }).join("\n");
   const plans = buildTrioPlans(A).sort((a, b) => b.hit - a.hit).slice(0, 5)
-    .map((p) => "・" + p.label + "：的中率" + p.hit.toFixed(0) + "% " + p.pts + "点").join("\n");
+    .map((p) => "・" + p.label + "：的中率" + p.hit.toFixed(0) + "% " + p.pts + "点" +
+      (p.ev != null ? " 期待値" + p.ev.toFixed(2) : "")).join("\n");
+  const vbs = valueBets(A);
+  const vbText = vbs.length
+    ? vbs.map((v) => "・" + v.type + " " + v.tickets.map((tk) => tk.num).join("-") + "：期待値" + v.ev.toFixed(2) + "（" + v.oddsStr + "・的中" + v.hit.toFixed(0) + "%）").join("\n")
+    : "（妙味候補なし or オッズ未取得）";
   const depth = A.depth;
   return "以下は " + race.place + race.race_no + "R「" + (race.name || "") + "」" +
     (race.course || "") + (race.direction ? "(" + race.direction + ")" : "") +
@@ -160,15 +165,16 @@ function buildClaudePrompt(race, A) {
     (race.weather ? " 天候" + race.weather : "") + " の出走馬と、市場オッズに基づく確率です。\n\n" +
     "【出走馬（AI勝率＝市場オッズ由来の順）】\n" + lines + "\n" +
     "（複勝率は" + depth + "着内率。近走指数は基準タイム比の参考値・馬場/クラス未補正）\n\n" +
-    "【3連複プラン候補（モデル算出の的中率）】\n" + plans + "\n\n" +
-    "この情報をもとに、『3連複の買い目』を2案、馬番で選んでください（出力はJSON）。最優先は的中率（当てること）。\n" +
+    "【3連複プラン候補（モデル算出の的中率・期待値）】\n" + plans + "\n\n" +
+    "【妙味（実オッズ×AI確率＝期待値が高い＝割安な買い目）】\n" + vbText + "\n\n" +
+    "この情報をもとに、『3連複の買い目』を2案、馬番で選んでください（出力はJSON）。的中率と期待値(妙味)の両立を狙う。\n" +
     "・3連複は3着以内に来るかが本質。馬の選定は勝率より『複勝率（3着内率）』を重視すること。\n" +
-    "・honmei＝本線：的中率重視で気持ち広めに。軸(axis)1〜2頭＋相手(partners)で合計12〜18点程度を許容。\n" +
-    "・osae＝抑え：さらに手広いBOX等で取りこぼしを防ぐ（合計〜35点程度。上位6〜8頭BOXでも可）。\n" +
-    "・axis/partners は馬番(整数)の配列。BOXで買う場合は axis を空配列[]にし、partners に対象馬を全部入れる。\n" +
-    "・複勝率が高い人気薄は積極的に相手へ。ただし明らかな実力下位（複勝率が極端に低い馬）は外す。\n" +
-    "・comment＝軸・相手の理由、当てるための狙い、リスクを2〜4行で簡潔に（日本語）。\n" +
-    "市場(オッズ)が最良予測である点を踏まえつつ、まずは的中率を上げる構成にすること。必勝ではない。";
+    "・honmei＝本線：的中率重視で気持ち広めに（軸1〜2頭＋相手、合計12〜18点目安）。\n" +
+    "・osae＝抑え：上の【妙味】の+EV候補（割安な人気薄）を絡め、期待値も狙う買い目（合計〜35点目安）。\n" +
+    "・axis/partners は馬番(整数)の配列。BOXは axis を空配列[]、partners に対象馬を全部。\n" +
+    "・期待値1.0超は理論上プラス。妙味のある人気薄は相手に積極採用。ただし複勝率が極端に低い馬は外す。\n" +
+    "・comment＝軸・相手の理由、的中率と期待値(妙味)の狙い、リスクを2〜4行で簡潔に（日本語）。\n" +
+    "市場(オッズ)が最良予測である点を踏まえ、的中率を確保しつつ妙味で回収率を底上げする構成に。必勝ではない。";
 }
 
 // 本物のClaude予想をレース別にブラウザ保存（無料・claude.aiの回答を取り込む）
@@ -839,13 +845,20 @@ function renderTrioPlans(A) {
   let rec = null;
   for (const p of plans) if (p.pts <= 36) { if (!rec || p.hit > rec.hit) rec = p; }
   if (!rec) rec = plans.slice().sort((a, b) => b.hit - a.hit)[0];
+  // 「妙味(EV)重視」のおすすめ＝EVが計算できる中で、的中率も確保(>=12%)しつつ期待値が最大
+  let recEV = null;
+  for (const p of plans) if (p.ev != null && isFinite(p.ev) && p.pts <= 36 && p.hit >= 12) { if (!recEV || p.ev > recEV.ev) recEV = p; }
   const sorted = plans.slice().sort((a, b) => b.hit - a.hit || a.pts - b.pts);
-  let h = '<div class="bet-note" style="margin-bottom:8px">的中率を上げるほど点数（金額）は増えます。予算に合うものを選んでください。<b>★＝的中率重視のおすすめ</b>。馬の選定は「3着内率（複勝）」基準。</div>';
+  let h = '<div class="bet-note" style="margin-bottom:8px"><b>★的中率重視</b>＝当てやすさ最大／<b>★妙味EV</b>＝オッズに対し割安（期待値最大）。期待値1.0超は理論上プラス。馬の選定は「3着内率（複勝）」基準。</div>';
   h += '<div class="bets">';
   for (const p of sorted) {
-    h += '<div class="bet-box bet-fuku3' + (p === rec ? " recommended" : "") + '">';
+    const tags = [];
+    if (p === rec) tags.push("的中率重視");
+    if (p === recEV && p !== rec) tags.push("妙味EV");
+    else if (p === recEV && p === rec) tags.push("妙味EV");
+    h += '<div class="bet-box bet-fuku3' + ((p === rec || p === recEV) ? " recommended" : "") + '">';
     h += '<div class="bet-type">' + esc(p.label) +
-      (p === rec ? ' <span class="rec-tag">★的中率重視</span>' : "") +
+      (tags.length ? ' <span class="rec-tag">★' + tags.join("・") + "</span>" : "") +
       '<span class="bet-hit">的中率 <b>' + p.hit.toFixed(1) + "%</b></span></div>";
     h += '<div class="fm">';
     for (const row of p.rows) {

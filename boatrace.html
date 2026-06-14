@@ -343,7 +343,7 @@ const PREVIEWS_URL = "https://boatraceopenapi.github.io/previews/v2/today.json";
 const RESULTS_URL = "https://boatraceopenapi.github.io/results/v2/today.json";
 
 // ビルド識別（最新ファイルを開いているか判別用）
-const APP_VERSION = "2026-06-13 Claude(AI)予想オプション追加 (v15)";
+const APP_VERSION = "2026-06-14 本命を12点フォーメーションに (v16)";
 
 // 天候番号 → 表示
 const WEATHER = { 1: "☀️晴", 2: "☁️曇", 3: "🌧️雨", 4: "❄️雪", 5: "🌫️霧" };
@@ -1098,21 +1098,44 @@ function renderTopCombos(combos, ranked) {
   return h;
 }
 
-// 勝ちに最も近い3連単フォーメーションを、分析確率による的中率で提案する。
+// 目標点数にいちばん近い3連単フォーメーションを選ぶ（着順別に候補を選択）。
+function pickFormationByPoints(combos, ranked, target) {
+  const idx = ranked.map((_, i) => i);
+  const ord2 = [...idx].sort((a, b) => ranked[b].p2 - ranked[a].p2);
+  const ord3 = [...idx].sort((a, b) => ranked[b].p3 - ranked[a].p3);
+  let best = null;
+  for (const n1 of [1, 2]) for (const n2 of [2, 3, 4]) for (const n3 of [3, 4, 5]) {
+    if (n2 < n1 || n3 < n2) continue;
+    const s1 = seq(n1), s2 = ord2.slice(0, n2), s3 = ord3.slice(0, n3);
+    const pts = countTrifecta(s1, s2, s3);
+    if (pts > 24) continue;
+    const hit = formationHitRate(combos, ranked, s1, s2, s3);
+    const cand = { s1, s2, s3, pts, hit };
+    if (!best) { best = cand; continue; }
+    const db = Math.abs(best.pts - target), dc = Math.abs(cand.pts - target);
+    if (dc < db || (dc === db && cand.hit > best.hit)) best = cand;
+  }
+  return best;
+}
+
+// 12点を本命に、絞り(約6点)と手広く(約18点)を添えて提案する。
 function renderBets(pred) {
   const { ranked, combos } = pred;
-  const frontier = buildFormations(combos, ranked);
-  const tiers = pickTiers(frontier);
-  // 効率（的中率/点数）が最も良いものを「おすすめ」に
-  let bestEff = tiers[0];
-  for (const t of tiers) if (t.hit / t.pts > bestEff.hit / bestEff.pts) bestEff = t;
-
-  const labels = ["絞り（少点数）", "標準", "手広く"];
+  const specs = [
+    { target: 6, label: "絞り（約6点）" },
+    { target: 12, label: "本命・12点", rec: true },
+    { target: 18, label: "手広く（約18点）" },
+  ];
   let h = "";
-  tiers.forEach((t, i) => {
-    const rec = (t === bestEff);
-    h += formationBox(labels[i] || "フォーメーション", t, ranked, rec);
-  });
+  const seen = new Set();
+  for (const sp of specs) {
+    const t = pickFormationByPoints(combos, ranked, sp.target);
+    if (!t) continue;
+    const sig = t.pts + ":" + t.s1 + "|" + t.s2 + "|" + t.s3;
+    if (seen.has(sig) && !sp.rec) continue; // 同じ買い目の重複は省略（本命は必ず表示）
+    seen.add(sig);
+    h += formationBox(sp.label, t, ranked, !!sp.rec);
+  }
   return h;
 }
 

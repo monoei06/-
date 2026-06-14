@@ -308,7 +308,7 @@ input[type="date"] {
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v13（Claudeが3連複買い目をカード表示）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v14（3連複の的中率改善・複勝基準＋広め＋8頭BOX）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -461,12 +461,14 @@ function buildClaudePrompt(race, A) {
     "【出走馬（AI勝率＝市場オッズ由来の順）】\n" + lines + "\n" +
     "（複勝率は" + depth + "着内率。近走指数は基準タイム比の参考値・馬場/クラス未補正）\n\n" +
     "【3連複プラン候補（モデル算出の的中率）】\n" + plans + "\n\n" +
-    "この情報をもとに、勝ちにいく『3連複の買い目』を2案、馬番で選んでください（出力はJSON）。\n" +
-    "・honmei＝本線：的中率を重視した堅めの買い目。軸(axis)1〜2頭＋相手(partners)で構成（合計おおむね10点以内が目安）。\n" +
-    "・osae＝抑え：少し手広く or 妙味の人気薄を絡めた買い目（合計おおむね20点以内）。\n" +
+    "この情報をもとに、『3連複の買い目』を2案、馬番で選んでください（出力はJSON）。最優先は的中率（当てること）。\n" +
+    "・3連複は3着以内に来るかが本質。馬の選定は勝率より『複勝率（3着内率）』を重視すること。\n" +
+    "・honmei＝本線：的中率重視で気持ち広めに。軸(axis)1〜2頭＋相手(partners)で合計12〜18点程度を許容。\n" +
+    "・osae＝抑え：さらに手広いBOX等で取りこぼしを防ぐ（合計〜35点程度。上位6〜8頭BOXでも可）。\n" +
     "・axis/partners は馬番(整数)の配列。BOXで買う場合は axis を空配列[]にし、partners に対象馬を全部入れる。\n" +
-    "・comment＝なぜその軸・相手なのか、展開やリスクを2〜4行で簡潔に（日本語）。\n" +
-    "市場(オッズ)が最良予測である点を踏まえ、軸は上位人気から大きく外しすぎないこと。必勝ではない。";
+    "・複勝率が高い人気薄は積極的に相手へ。ただし明らかな実力下位（複勝率が極端に低い馬）は外す。\n" +
+    "・comment＝軸・相手の理由、当てるための狙い、リスクを2〜4行で簡潔に（日本語）。\n" +
+    "市場(オッズ)が最良予測である点を踏まえつつ、まずは的中率を上げる構成にすること。必勝ではない。";
 }
 
 // 本物のClaude予想をレース別にブラウザ保存（無料・claude.aiの回答を取り込む）
@@ -1085,60 +1087,70 @@ function chipOf(x) { return { num: x.idxNum, mark: "", name: x.h.name }; }
 /* ----------------------------- 3連複プラン（的中率重視・複数の買い方） ------------------------------ */
 // すべて A.trio（その3頭がtop3になる厳密確率）を合算 → 的中率。買い目は互いに排他なので単純和でOK。
 function buildTrioPlans(A) {
-  const R = A.items, n = R.length, plans = [];
+  const n = A.n, plans = [];
   if (n < 4) return plans;
-  const evalTriples = (triples) => {
+  // 3連複は「3着以内に来るか」が本質。勝率ではなく3着内率(複勝)で並べて選ぶ。
+  const P = A.items.slice().sort((a, b) => (b.in3 - a.in3) || (b.p1 - a.p1));
+  const numAt = (i) => P[i].idxNum;
+  const evalNums = (triples) => {
     let hit = 0; const evc = [];
-    for (const [a, b, c] of triples) {
-      const na = R[a].idxNum, nb = R[b].idxNum, nc = R[c].idxNum;
-      const pr = A.trio[trioKey(na, nb, nc)] || 0;
+    for (const t of triples) {
+      const pr = A.trio[trioKey(t[0], t[1], t[2])] || 0;
       hit += pr;
-      evc.push({ prob: pr, odds: poolOdds(A.pools && A.pools.trio, tKey(na, nb, nc)) });
+      evc.push({ prob: pr, odds: poolOdds(A.pools && A.pools.trio, tKey(t[0], t[1], t[2])) });
     }
     return { hit: hit * 100, ev: evRatio(evc), pts: triples.length };
   };
   const mkAxis1 = (k) => {
-    const part = []; for (let j = 1; j <= k; j++) part.push(j);
-    const tr = []; for (let i = 0; i < part.length; i++) for (let j = i + 1; j < part.length; j++) tr.push([0, part[i], part[j]]);
-    return Object.assign({ kind: "axis1", label: "◎1頭軸ながし − 相手" + k + "頭",
-      rows: [{ label: "軸", idxs: [0] }, { label: "相手", idxs: part }] }, evalTriples(tr));
+    const ax = numAt(0); const part = []; for (let j = 1; j <= k; j++) part.push(numAt(j));
+    const tr = []; for (let i = 0; i < part.length; i++) for (let j = i + 1; j < part.length; j++) tr.push([ax, part[i], part[j]]);
+    return Object.assign({ kind: "axis1", label: "軸1頭ながし − 相手" + k + "頭",
+      rows: [{ label: "軸", nums: [ax] }, { label: "相手", nums: part }] }, evalNums(tr));
   };
   const mkAxis2 = (m) => {
-    const part = []; for (let j = 2; j < 2 + m; j++) part.push(j);
-    const tr = part.map((p) => [0, 1, p]);
-    return Object.assign({ kind: "axis2", label: "◎○2頭軸ながし − 相手" + m + "頭",
-      rows: [{ label: "軸", idxs: [0, 1] }, { label: "相手", idxs: part }] }, evalTriples(tr));
+    const a1 = numAt(0), a2 = numAt(1); const part = []; for (let j = 2; j < 2 + m; j++) part.push(numAt(j));
+    const tr = part.map((p) => [a1, a2, p]);
+    return Object.assign({ kind: "axis2", label: "軸2頭ながし − 相手" + m + "頭",
+      rows: [{ label: "軸", nums: [a1, a2] }, { label: "相手", nums: part }] }, evalNums(tr));
   };
   const mkBox = (k) => {
-    const idx = []; for (let j = 0; j < k; j++) idx.push(j);
-    const tr = []; for (let a = 0; a < k; a++) for (let b = a + 1; b < k; b++) for (let c = b + 1; c < k; c++) tr.push([a, b, c]);
+    const idx = []; for (let j = 0; j < k; j++) idx.push(numAt(j));
+    const tr = []; for (let a = 0; a < k; a++) for (let b = a + 1; b < k; b++) for (let c = b + 1; c < k; c++) tr.push([idx[a], idx[b], idx[c]]);
     return Object.assign({ kind: "box", label: "上位" + k + "頭BOX",
-      rows: [{ label: "BOX", idxs: idx }] }, evalTriples(tr));
+      rows: [{ label: "BOX", nums: idx }] }, evalNums(tr));
   };
-  for (const k of [3, 4, 5, 6]) if (1 + k <= n) plans.push(mkAxis1(k));
-  for (const m of [3, 4, 5]) if (2 + m <= n) plans.push(mkAxis2(m));
-  for (const k of [4, 5, 6, 7]) if (k <= n) plans.push(mkBox(k));
-  return plans.filter((p) => p.pts <= 36 && p.pts > 0);
+  for (const k of [3, 4, 5, 6, 7]) if (1 + k <= n) plans.push(mkAxis1(k));
+  for (const m of [3, 4, 5, 6]) if (2 + m <= n) plans.push(mkAxis2(m));
+  for (const k of [4, 5, 6, 7, 8]) if (k <= n) plans.push(mkBox(k));
+  return plans.filter((p) => p.pts <= 56 && p.pts > 0);
+}
+
+// 馬番→チップ（印は勝率順位 A.items のランクで付与）
+function numChipHTML(A, num) {
+  const it = A.items.find((x) => x.idxNum === num);
+  const rk = it ? A.items.indexOf(it) : -1;
+  return chipHTML({ num, mark: rk >= 0 ? (MARKS[rk] || "") : "", name: it ? it.h.name : "" });
 }
 
 function renderTrioPlans(A) {
   const plans = buildTrioPlans(A);
   if (!plans.length) return '<div class="bet-box">3連複の算出に十分な頭数がありません。</div>';
-  // おすすめ＝的中率40%以上で「的中率÷点数」効率が最大。無ければ最高的中率。
-  let rec = null, bestEff = -1;
-  for (const p of plans) { const eff = p.hit / p.pts; if (p.hit >= 40 && eff > bestEff) { bestEff = eff; rec = p; } }
-  if (!rec) rec = plans.reduce((a, b) => (b.hit > a.hit ? b : a), plans[0]);
+  // 「的中率重視」のおすすめ＝点数36以内で最も的中率が高いもの
+  let rec = null;
+  for (const p of plans) if (p.pts <= 36) { if (!rec || p.hit > rec.hit) rec = p; }
+  if (!rec) rec = plans.slice().sort((a, b) => b.hit - a.hit)[0];
   const sorted = plans.slice().sort((a, b) => b.hit - a.hit || a.pts - b.pts);
-  let h = '<div class="bets">';
+  let h = '<div class="bet-note" style="margin-bottom:8px">的中率を上げるほど点数（金額）は増えます。予算に合うものを選んでください。<b>★＝的中率重視のおすすめ</b>。馬の選定は「3着内率（複勝）」基準。</div>';
+  h += '<div class="bets">';
   for (const p of sorted) {
     h += '<div class="bet-box bet-fuku3' + (p === rec ? " recommended" : "") + '">';
     h += '<div class="bet-type">' + esc(p.label) +
-      (p === rec ? ' <span class="rec-tag">★おすすめ</span>' : "") +
+      (p === rec ? ' <span class="rec-tag">★的中率重視</span>' : "") +
       '<span class="bet-hit">的中率 <b>' + p.hit.toFixed(1) + "%</b></span></div>";
     h += '<div class="fm">';
     for (const row of p.rows) {
       h += '<div class="fm-row"><span class="fm-pos">' + row.label + '</span><span class="fm-chips">' +
-        row.idxs.map((i) => chipHTML(chip(A.items[i], i))).join("") + "</span></div>";
+        row.nums.map((num) => numChipHTML(A, num)).join("") + "</span></div>";
     }
     h += "</div>";
     h += '<div class="bet-summary">' + p.pts + "点 = <b>" + (p.pts * 100).toLocaleString() + "円</b>（100円/点）";
@@ -1149,8 +1161,8 @@ function renderTrioPlans(A) {
     }
     h += "</div></div>";
   }
-  h += '<div class="bet-note">※ 的中率＝モデル確率で算出。点数が多いほど的中率は上がりますが配当妙味は下がります。' +
-    'EV/ROIは実オッズ取得時のみ表示（GAS最新版が必要）。</div>';
+  h += '<div class="bet-note">※ 的中率は市場オッズ由来の理論値で、実際はやや割れる（外れる）こともあります。' +
+    '<b>頻繁に当てたいなら、複勝・ワイドの併用</b>が有効です（下の「勝ちやすい買い目」参照）。</div>';
   h += "</div>";
   return h;
 }
@@ -1421,7 +1433,7 @@ function aiAnalysisHTML(race, A) {
   for (const p of plans) { const e = p.hit / p.pts; if (p.hit >= 40 && e > eff) { eff = e; rec = p; } }
   if (!rec && plans.length) rec = plans[0];
   if (rec) {
-    const members = rec.rows.map((row) => row.label + "[" + row.idxs.map((i) => R[i].idxNum).join("・") + "]").join(" ");
+    const members = rec.rows.map((row) => row.label + "[" + row.nums.join("・") + "]").join(" ");
     h += sec("🎯推奨　", "3連複 " + esc(rec.label) + "（" + members + "）＝ " + rec.pts + "点・的中率" + rec.hit.toFixed(0) + "%。" +
       "堅実に当てるなら◎の複勝も併用。");
   }

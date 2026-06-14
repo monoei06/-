@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v18（スピード指数を距離・クラス・馬場・斤量で補正）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v19（単勝・データ重視に切替）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -120,30 +120,15 @@ async function callClaude(prompt) {
   return (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
 
-// 3連複の買い目を構造化出力(JSON)で受け取るスキーマ
+// 単勝の予想を構造化出力(JSON)で受け取るスキーマ（picks=本命順の馬番、1〜3頭）
 const CLAUDE_BET_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    honmei: {
-      type: "object", additionalProperties: false,
-      properties: {
-        axis: { type: "array", items: { type: "integer" } },
-        partners: { type: "array", items: { type: "integer" } },
-      },
-      required: ["axis", "partners"],
-    },
-    osae: {
-      type: "object", additionalProperties: false,
-      properties: {
-        axis: { type: "array", items: { type: "integer" } },
-        partners: { type: "array", items: { type: "integer" } },
-      },
-      required: ["axis", "partners"],
-    },
+    picks: { type: "array", items: { type: "integer" } },
     comment: { type: "string" },
   },
-  required: ["honmei", "osae", "comment"],
+  required: ["picks", "comment"],
 };
 
 // Claude APIを構造化出力で呼び、JSON文字列を返す
@@ -204,14 +189,12 @@ function buildClaudePrompt(race, A) {
     "（複勝率は" + depth + "着内率。近走指数は基準タイム比の参考値・馬場/クラス未補正）\n\n" +
     "【3連複プラン候補（モデル算出の的中率・期待値）】\n" + plans + "\n\n" +
     "【妙味（実オッズ×AI確率＝期待値が高い＝割安な買い目）】\n" + vbText + "\n\n" +
-    "この情報をもとに、『3連複の買い目』を2案、馬番で選んでください（出力はJSON）。的中率と期待値(妙味)の両立を狙う。\n" +
-    "・3連複は3着以内に来るかが本質。馬の選定は勝率より『複勝率（3着内率）』を重視すること。\n" +
-    "・honmei＝本線：的中率重視で気持ち広めに（軸1〜2頭＋相手、合計12〜18点目安）。\n" +
-    "・osae＝抑え：上の【妙味】の+EV候補（割安な人気薄）を絡め、期待値も狙う買い目（合計〜35点目安）。\n" +
-    "・axis/partners は馬番(整数)の配列。BOXは axis を空配列[]、partners に対象馬を全部。\n" +
-    "・期待値1.0超は理論上プラス。妙味のある人気薄は相手に積極採用。ただし複勝率が極端に低い馬は外す。\n" +
-    "・comment＝軸・相手の理由、的中率と期待値(妙味)の狙い、リスクを2〜4行で簡潔に（日本語）。\n" +
-    "市場(オッズ)が最良予測である点を踏まえ、的中率を確保しつつ妙味で回収率を底上げする構成に。必勝ではない。";
+    "この情報をもとに、『単勝』の予想を出してください（出力はJSON）。" + (A.dataUsed ? "AI勝率は近走データ反映後の値です。" : "") + "\n" +
+    "・picks＝買うべき単勝の馬番を本命順に1〜3頭（整数配列）。先頭が本命。\n" +
+    "・データ重視で。市場で人気薄でも、近走スピード指数が高い／上昇している馬は積極的に拾う。\n" +
+    "・期待値（AI勝率×単勝オッズ）が1.0超の馬は妙味として優先候補。ただし指数も人気も低い馬は外す。\n" +
+    "・comment＝本命の理由（データ根拠）、妙味の指摘、リスクを2〜4行で簡潔に（日本語）。\n" +
+    "必勝ではない。データの裏付けがある馬を選ぶこと。";
 }
 
 // 本物のClaude予想をレース別にブラウザ保存（無料・claude.aiの回答を取り込む）
@@ -237,10 +220,11 @@ function claudeMainBody() {
   return h;
 }
 function realClaudeView(saved) {
-  // API(JSON)で保存された買い目ならカード表示、そうでなければ（手動取込み等）テキスト表示
+  // API(JSON)で保存された予想ならカード表示、そうでなければ（手動取込み等）テキスト表示
   let obj = null;
-  try { const o = JSON.parse(saved); if (o && (o.honmei || o.osae)) obj = o; } catch { obj = null; }
-  if (obj && lastRender) return renderClaudeBets(obj, lastRender.A);
+  try { const o = JSON.parse(saved); if (o && (o.picks || o.honmei || o.osae)) obj = o; } catch { obj = null; }
+  if (obj && obj.picks && lastRender) return renderClaudeWin(obj, lastRender.A);
+  if (obj && (obj.honmei || obj.osae) && lastRender) return renderClaudeBets(obj, lastRender.A);
   return '<div class="claude-real">🟣 <b>Claudeの予想</b></div>' +
     '<div class="claude-text">' + esc(saved).replace(/\n/g, "<br>") + "</div>" +
     '<div class="claude-foot">' +
@@ -291,6 +275,22 @@ function claudePlanCard(label, axis, partners, A) {
       '<span class="roi ' + (roi >= 0 ? "pos" : "neg") + '">ROI ' + (roi >= 0 ? "+" : "") + roi.toFixed(0) + "%</span>";
   }
   h += "</div></div>";
+  return h;
+}
+// Claudeの単勝予想（picks=本命順の馬番）をカード表示
+function renderClaudeWin(obj, A) {
+  const valid = {}; A.items.forEach((x) => { valid[x.idxNum] = 1; });
+  const picks = (Array.isArray(obj.picks) ? obj.picks : []).map(Number).filter((n) => valid[n]);
+  let h = '<div class="claude-real">🟣 <b>Claudeの単勝予想</b>（claude-opus-4-8' + (A.dataUsed ? "・データ反映" : "") + "）</div>";
+  h += '<div class="bets">';
+  picks.forEach((n, i) => {
+    const x = A.items.find((y) => y.idxNum === n);
+    if (x) h += winCard(i === 0 ? "◎ 本命の単勝" : "○ 単勝候補" + (i + 1), x, A, i === 0 ? "tetsuban" : "tan3");
+  });
+  if (!picks.length) h += '<div class="bet-box">対象馬を特定できませんでした。</div>';
+  h += "</div>";
+  if (obj.comment) h += '<div class="claude-text">💬 ' + esc(obj.comment).replace(/\n/g, "<br>") + "</div>";
+  h += '<div class="claude-foot"><button id="askClaude" class="claude-btn small">🔄 再予想</button></div>';
   return h;
 }
 function renderClaudeBets(obj, A) {
@@ -939,6 +939,45 @@ function renderTrioPlans(A) {
   return h;
 }
 
+/* ----------------------------- 単勝（データ重視） ------------------------------ */
+function winEVof(x) { return x.h.win_odds ? x.p1 / 100 * x.h.win_odds : null; }
+function winCard(label, x, A, kind) {
+  const ev = winEVof(x), ps = pastSummary(x.h.past);
+  let h = '<div class="bet-box bet-' + kind + '"><div class="bet-type">' + esc(label) +
+    '<span class="bet-hit">AI勝率 <b>' + x.p1.toFixed(1) + "%</b></span></div>";
+  h += '<div class="fm-chips ticket-chips">' + numChipHTML(A, x.idxNum) + "</div>";
+  h += '<div class="bet-summary">単勝 ' + (x.h.win_odds ? fmt(x.h.win_odds) + "倍" : "-") +
+    "（市場勝率" + x.marketP1.toFixed(0) + "%）" +
+    (ev != null ? ' ／ 期待値 <b class="' + (ev >= 1 ? "ev" : "") + '">' + ev.toFixed(2) + "</b>" : "") +
+    (ps && ps.best != null ? " ／ 近走指数best" + ps.best + (ps.trend >= 5 ? "↑" : "") : "") + "</div></div>";
+  return h;
+}
+function renderWinBets(A) {
+  const R = A.items;
+  if (!R.length) return "";
+  // 妙味(+EV)の単勝：勝率4%以上で期待値が最大
+  let best = null;
+  for (const x of R) { const ev = winEVof(x); if (ev != null && x.p1 >= 4 && (!best || ev > best.ev)) best = { x, ev }; }
+  let h = '<div class="bet-note" style="margin-bottom:8px">' + (A.dataUsed ? "<b>データ反映 " + Math.round(A.dataLambda * 100) + "%</b>後の" : "") +
+    "AI勝率で単勝を評価。期待値=AI勝率×単勝オッズ（1.0超で理論プラス＝妙味）。</div>";
+  h += '<div class="bets">';
+  h += winCard("◎ 本命の単勝（AI勝率最大）", R[0], A, "tetsuban");
+  if (best && best.x !== R[0]) h += winCard("🔥 妙味の単勝（期待値最大）", best.x, A, "tan3");
+  h += "</div>";
+  h += '<div class="bet-box"><div class="bet-type">単勝候補（データAI勝率順）</div>';
+  R.slice(0, 6).forEach((x) => {
+    const ev = winEVof(x), ps = pastSummary(x.h.past);
+    h += '<div class="combo-row">' + numChipHTML(A, x.idxNum) +
+      '<span class="value-meta">AI勝率' + x.p1.toFixed(1) + "%（市場" + x.marketP1.toFixed(0) + "%）／単勝" +
+      (x.h.win_odds ? fmt(x.h.win_odds) + "倍" : "-") +
+      (ev != null ? ' ／ <b class="' + (ev >= 1 ? "ev" : "") + '">EV' + ev.toFixed(2) + "</b>" : "") +
+      (ps && ps.best != null ? " ／ 指数" + ps.best : "") + "</span></div>";
+  });
+  h += '<div class="bet-note">※ データ重視ほど人気薄が上位に来ます（市場より当たりにくくなる傾向）。妙味（EV）を併用して回収率を意識。</div>';
+  h += "</div>";
+  return h;
+}
+
 /* ----------------------------- EV重視の3連複（統計・バリューベッティング） ------------------------------ */
 // Plackett–Luce確率 × 実オッズ で 期待値(EV)が高い3連複だけを選ぶ（回収率最大化）。
 function buildEVTrios(A, minEV, maxPts) {
@@ -1052,7 +1091,11 @@ function renderResult(race, A) {
   html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
     '<div class="cc-body"><div id="claudeOut" class="claude-out">' + claudeMainBody() + "</div></div></div>";
 
-  // EV重視の3連複（統計・回収率優先）← メイン
+  // 単勝（データ重視）← メイン
+  html += '<div class="section-label">🥇 単勝（データ重視）</div>';
+  html += renderWinBets(A);
+
+  // EV重視の3連複（統計・回収率優先）
   html += '<div class="section-label">📈 EV重視の3連複（統計・回収率優先）</div>';
   html += renderEVTrios(A);
 

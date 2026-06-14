@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v15（妙味EVを買い目とClaudeに反映）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v16（EV最大化の3連複・統計バリューベッティング）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -880,6 +880,63 @@ function renderTrioPlans(A) {
   return h;
 }
 
+/* ----------------------------- EV重視の3連複（統計・バリューベッティング） ------------------------------ */
+// Plackett–Luce確率 × 実オッズ で 期待値(EV)が高い3連複だけを選ぶ（回収率最大化）。
+function buildEVTrios(A, minEV, maxPts) {
+  if (!A.pools || !A.pools.trio) return null;
+  const nums = A.items.map((x) => x.idxNum), combos = [];
+  for (let i = 0; i < nums.length; i++) for (let j = i + 1; j < nums.length; j++) for (let k = j + 1; k < nums.length; k++) {
+    const a = nums[i], b = nums[j], c = nums[k];
+    const p = A.trio[trioKey(a, b, c)] || 0;
+    const odds = poolOdds(A.pools.trio, tKey(a, b, c));
+    if (!odds || p <= 0) continue;
+    const ev = p * odds;
+    if (ev >= minEV) combos.push({ nums: [a, b, c], p, odds, ev });
+  }
+  combos.sort((x, y) => y.ev - x.ev);
+  const sel = maxPts ? combos.slice(0, maxPts) : combos;
+  let expReturn = 0, hit = 0;
+  for (const c of sel) { expReturn += c.p * c.odds; hit += c.p; }
+  const pts = sel.length;
+  return { combos: sel, pts, cost: pts * 100, roi: pts ? (expReturn / pts - 1) * 100 : 0, hitRate: hit * 100 };
+}
+
+function renderEVTrios(A) {
+  if (!A.pools || !A.pools.trio) {
+    return '<div class="bet-box">EV重視の3連複は<b>実オッズ（3連複プール）</b>が必要です。データサーバー(GAS)を最新コードに再デプロイすると表示されます。</div>';
+  }
+  const tiers = [
+    { label: "本線：EV厳選（期待値1.3以上）", minEV: 1.3, maxPts: 20 },
+    { label: "手広く：EV1.1以上", minEV: 1.1, maxPts: 40 },
+  ];
+  let h = '<div class="bet-note" style="margin-bottom:8px">統計モデル(Plackett–Luce)の確率 × 実オッズで、<b>期待値(EV)が高い3連複だけ</b>を買う回収率優先の構成。EV=確率×配当、<b>1.0超で理論上プラス</b>。1点ずつは外れやすいので、点数を散らして長く回す前提。</div>';
+  let any = false;
+  for (const t of tiers) {
+    const r = buildEVTrios(A, t.minEV, t.maxPts);
+    if (!r || !r.pts) continue;
+    any = true;
+    h += '<div class="bet-box bet-fuku3">';
+    h += '<div class="bet-type">' + esc(t.label) +
+      '<span class="bet-hit">合算的中率 <b>' + r.hitRate.toFixed(1) + "%</b></span></div>";
+    h += '<div class="ev-combos">';
+    const show = r.combos.slice(0, 15);
+    for (const c of show) {
+      h += '<span class="ev-combo">' + c.nums.map((n) => numChipHTML(A, n)).join("") +
+        '<span class="ev-tag">EV' + c.ev.toFixed(2) + "</span></span>";
+    }
+    if (r.combos.length > show.length) h += '<span class="ev-more">…他' + (r.combos.length - show.length) + "点</span>";
+    h += "</div>";
+    const roi = r.roi;
+    h += '<div class="bet-summary">' + r.pts + "点 = <b>" + r.cost.toLocaleString() + "円</b>" +
+      ' ／ 期待回収率 <b class="' + (roi >= 0 ? "ev" : "") + '">' + (100 + roi).toFixed(0) + "%</b>" +
+      '<span class="roi ' + (roi >= 0 ? "pos" : "neg") + '">ROI ' + (roi >= 0 ? "+" : "") + roi.toFixed(0) + "%</span></div>";
+    h += "</div>";
+  }
+  if (!any) h += '<div class="bet-box">今のオッズでは期待値1.1以上の3連複が見つかりません（割高なレース）。' +
+    '<b>無理に買わない</b>のも正解です。EVがプラスの馬券が出るレースだけ狙うのが回収率を上げるコツ。</div>';
+  return h;
+}
+
 /* ----------------------------- 信頼度スコア（目安） ------------------------------ */
 function confidence(A) {
   let c = 58;
@@ -934,8 +991,12 @@ function renderResult(race, A) {
   html += '<div class="claude-comment"><div class="cc-head">🧠 Claudeの予想</div>' +
     '<div class="cc-body"><div id="claudeOut" class="claude-out">' + claudeMainBody() + "</div></div></div>";
 
-  // 3連複 的中率重視プラン（メイン）
-  html += '<div class="section-label">🎯 3連複 的中率重視プラン（複数の買い方）</div>';
+  // EV重視の3連複（統計・回収率優先）← メイン
+  html += '<div class="section-label">📈 EV重視の3連複（統計・回収率優先）</div>';
+  html += renderEVTrios(A);
+
+  // 3連複 的中率重視プラン（当てやすさ重視の別案）
+  html += '<div class="section-label">🎯 3連複 的中率重視プラン（当てやすさ重視）</div>';
   html += renderTrioPlans(A);
 
   // 妙味（期待値プラス）

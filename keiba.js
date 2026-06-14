@@ -8,7 +8,7 @@
  * バックエンドは小さなプロキシ(worker/keiba-proxy.js)のみ。
  * =========================================================================== */
 
-const APP_VERSION = "2026-06-13 競馬AI予想 v17（オッズ×データ混合で予想）";
+const APP_VERSION = "2026-06-13 競馬AI予想 v18（スピード指数を距離・クラス・馬場・斤量で補正）";
 
 // データサーバー(Cloudflare Worker)の既定URL。未デプロイなら ⚙️ で各自設定。
 const DEFAULT_PROXY_URL = "https://keiba.komemonoei.workers.dev/";
@@ -769,20 +769,40 @@ function placeOddsOf(h) {
   return { min: h.place_min, max, avg: (h.place_min + max) / 2 };
 }
 
-/* ----------------------------- 近走スピード指数（参考・確率には不使用） ------------------------------ */
-// 直近81Rの回帰から得た基準タイム（秒）。芝/ダの距離一次近似。あくまで参考値。
-const GOING_OFF = { "良": 0, "稍": 0.5, "重": 1.0, "不": 1.5 };
-function parTimeSec(surface, dist) {
-  if (surface === "芝") return 0.0643 * dist - 9.6;
-  if (surface === "ダ") return 0.0697 * dist - 13.9;
-  return null; // 障害などは対象外
+/* ----------------------------- スピード指数（距離・クラス・馬場・斤量 補正） ------------------------------ */
+// 過去走2300本超の多変量回帰で推定した係数。基準タイム par=a*dist+b に、クラス補正(cls)・
+// 馬場補正(go)・斤量補正(wc,通説の固定係数)を加えた「期待タイム」と実タイムの差×10が指数。
+const SF_COEF = {
+  "芝": { a: 0.06584, b: -10.019,
+    cls: { 0: 0.975, 1: -0.519, 2: -1.187, 3: -0.547, 4: -0.385, 5: -0.5, 6: -0.6, 7: -0.7 },
+    go: { "良": -0.175, "稍": 1.091, "重": 1.164, "不": 1.45 }, wc: 0.10 },
+  "ダ": { a: 0.07128, b: -12.648,
+    cls: { 0: 0.952, 1: -0.537, 2: -0.716, 3: -2.07, 4: -1.852, 5: -1.9, 6: -2.0, 7: -2.1 },
+    go: { "良": 0.137, "稍": 0.009, "重": -0.879, "不": -0.576 }, wc: 0.10 },
+};
+function classLevel(k) {
+  k = k || "";
+  if (/新馬|未勝利/.test(k)) return 0;
+  if (/1勝|500万/.test(k)) return 1;
+  if (/2勝|1000万/.test(k)) return 2;
+  if (/3勝|1600万/.test(k)) return 3;
+  if (/G1|GⅠ/.test(k)) return 7;
+  if (/G2|GⅡ/.test(k)) return 6;
+  if (/G3|GⅢ/.test(k)) return 5;
+  if (/オープン|ＯＰ|OP|リステッド/.test(k)) return 4;
+  return 2; // 不明は中位相当
 }
-// スピード指数：基準タイムより速いほど高い（+10 ≒ 1.0秒速い）
+// スピード指数：期待タイム(距離・クラス・馬場・斤量) − 実タイム を10倍（速いほど高い）
 function speedFigure(p) {
-  const par = parTimeSec(p.surface, p.dist);
-  if (par == null || !p.sec) return null;
-  const go = GOING_OFF[p.going] != null ? GOING_OFF[p.going] : 0;
-  return Math.round(((par + go) - p.sec) * 10);
+  const C = SF_COEF[p.surface];
+  if (!C || !p.sec) return null;
+  const par = C.a * p.dist + C.b;
+  const lvl = classLevel(p.klass);
+  const clsAdd = (C.cls[lvl] != null) ? C.cls[lvl] : -0.5;
+  const goAdd = (C.go[p.going] != null) ? C.go[p.going] : 0;
+  const wAdj = (p.weight_carry != null) ? C.wc * (p.weight_carry - 55) : 0; // 重い斤量で同タイム＝加点
+  const fig = (par + clsAdd + goAdd + wAdj) - p.sec;
+  return Math.round(fig * 10);
 }
 function pastSummary(past) {
   if (!past || !past.length) return null;

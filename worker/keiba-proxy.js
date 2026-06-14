@@ -266,6 +266,7 @@ function parsePast(html) {
       const dm = d01.match(/([\d.]+)\s+(\S+)/);
       const fld = d03.match(/(\d+)頭/);
       const pop = d03.match(/(\d+)人/);
+      const wk = d03.match(/(\d{2}\.\d)\s*$/);          // 斤量（行末の小数）
       const ag = d06.match(/\((\d{2}\.\d)\)/);
       const bw = d06.match(/(\d{3})\(([-+]?\d+)\)/);
       const mg = d07.match(/\((-?[\d.]+)\)/);
@@ -274,6 +275,7 @@ function parsePast(html) {
         surface: cm[1], dist: Number(cm[2]),
         sec: Number(cm[3]) * 60 + Number(cm[4]) + Number(cm[5]) / 10,
         going: cm[6] || "", field: fld ? Number(fld[1]) : null, pop: pop ? Number(pop[1]) : null,
+        weight_carry: wk ? Number(wk[1]) : null,
         agari: ag ? Number(ag[1]) : null, body: bw ? Number(bw[1]) : null, bdiff: bw ? Number(bw[2]) : null,
         margin: mg ? Number(mg[1]) : null,
       });
